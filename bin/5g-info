@@ -17,7 +17,7 @@ from quectel.frequency import (
     format_lte_bandwidth,
     format_nr5g_bandwidth,
 )
-from quectel.modem import Modem
+from quectel.modem import Modem, ModemError
 from quectel.thresholds import (
     SignalQuality,
     classify_rsrp,
@@ -223,11 +223,16 @@ def main():
             if not attr.startswith("_") and attr.isupper():
                 setattr(Colors, attr, "")
 
+    config = load_config(args.config)
+
     try:
-        config = load_config(args.config)
         modem = Modem.from_config(config)
+    except ModemError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print(f"Check that the modem is connected and {config.device} is correct.", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
-        print(f"Error connecting to modem: {e}", file=sys.stderr)
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
     sections = args.section

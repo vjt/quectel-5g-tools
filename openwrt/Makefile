@@ -64,11 +64,16 @@ define Package/quectel-5g-tools/install
 
 	# Install default config
 	$(INSTALL_DIR) $(1)/etc/quectel
-	$(INSTALL_CONF) $(PKG_BUILD_DIR)/config/quectel.json $(1)/etc/quectel/config.json
+	$(INSTALL_CONF) $(PKG_BUILD_DIR)/config/quectel.toml $(1)/etc/quectel/config.toml
+
+	# Install UCI config
+	$(INSTALL_DIR) $(1)/etc/config
+	$(INSTALL_CONF) $(PKG_BUILD_DIR)/config/quectel.uci $(1)/etc/config/quectel
 endef
 
 define Package/quectel-5g-tools/conffiles
-/etc/quectel/config.json
+/etc/quectel/config.toml
+/etc/config/quectel
 endef
 
 $(eval $(call BuildPackage,quectel-5g-tools))

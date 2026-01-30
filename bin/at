@@ -8,7 +8,7 @@ sys.path.insert(0, "/usr/lib/python3")
 sys.path.insert(0, str(__file__ and __import__("pathlib").Path(__file__).parent.parent / "src"))
 
 from quectel.config import load_config
-from quectel.modem import Modem
+from quectel.modem import Modem, ModemError
 
 # Default commands to run when called without arguments
 DEFAULT_COMMANDS = [
@@ -24,11 +24,16 @@ DEFAULT_COMMANDS = [
 
 
 def main():
+    config = load_config()
+
     try:
-        config = load_config()
         modem = Modem.from_config(config)
+    except ModemError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print(f"Check that the modem is connected and {config.device} is correct.", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
-        print(f"Error connecting to modem: {e}", file=sys.stderr)
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
     if len(sys.argv) > 1:

@@ -18,7 +18,7 @@ from quectel.frequency import (
     format_nr5g_bandwidth,
 )
 from quectel.models import CarrierComponent, LteServingCell, NeighbourCell, Nr5gServingCell
-from quectel.modem import Modem
+from quectel.modem import Modem, ModemError
 from quectel.thresholds import (
     SignalQuality,
     classify_rsrp,
@@ -424,13 +424,18 @@ def main():
 
     args = parser.parse_args()
 
+    config = load_config(args.config)
+    if args.interval:
+        config.refresh_interval = args.interval
+
     try:
-        config = load_config(args.config)
-        if args.interval:
-            config.refresh_interval = args.interval
         modem = Modem.from_config(config)
+    except ModemError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print(f"Check that the modem is connected and {config.device} is correct.", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
-        print(f"Error connecting to modem: {e}", file=sys.stderr)
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
     def run_ui(stdscr):

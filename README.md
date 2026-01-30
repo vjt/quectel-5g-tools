@@ -85,21 +85,24 @@ force-bands --lte 1,3,7,20 --nr5g 78 --verify
 
 ## Configuration
 
-Default config: `/etc/quectel/config.json`
+Default config: `/etc/quectel/config.toml`
 
-```json
-{
-  "modem_device": null,
-  "modem_bus": "1-1.2",
-  "backend": "gl_modem",
-  "refresh_interval": 5.0,
-  "beep_interval": 0.6,
-  "lte_bands": [1, 3, 7, 20],
-  "nr5g_bands": [78]
-}
+```toml
+[modem]
+# Serial device for AT commands (Quectel modems typically use ttyUSB2)
+device = "/dev/ttyUSB2"
+baudrate = 115200
+timeout = 2.0
+
+[monitor]
+refresh_interval = 5.0
+beep_interval = 0.6
+beeps_enabled = true
+
+[bands]
+lte = [1, 3, 7, 20]
+nr5g = [78]
 ```
-
-On OpenWRT, UCI config overlays JSON settings.
 
 ## Signal Quality Thresholds
 

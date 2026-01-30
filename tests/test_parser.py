@@ -9,7 +9,35 @@ from quectel.parser import (
     parse_qeng_servingcell,
     parse_qnwprefcfg,
     parse_qspn,
+    parse_response,
 )
+
+
+class TestParseResponse:
+    def test_basic(self):
+        response = '+QSPN: "I TIM","TIM","",0,"22201"\n\nOK'
+        results = list(parse_response(response, "+QSPN"))
+        assert len(results) == 1
+        assert results[0] == ["I TIM", "TIM", "", "0", "22201"]
+
+    def test_multiple_lines(self):
+        response = """+QENG: "LTE","FDD",222,01
++QENG: "NR5G-NSA",222,01
+
+OK"""
+        results = list(parse_response(response, "+QENG"))
+        assert len(results) == 2
+
+    def test_skips_empty_and_ok(self):
+        response = "\n\n+TEST: a,b,c\n\nOK\n"
+        results = list(parse_response(response, "+TEST"))
+        assert len(results) == 1
+        assert results[0] == ["a", "b", "c"]
+
+    def test_strips_quotes(self):
+        response = '+TEST: "quoted","also quoted",unquoted\nOK'
+        results = list(parse_response(response, "+TEST"))
+        assert results[0] == ["quoted", "also quoted", "unquoted"]
 
 
 class TestParseAti:
