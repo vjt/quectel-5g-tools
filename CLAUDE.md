@@ -1,54 +1,48 @@
 # Overview
 
-This is a set of scripts I wrote to extract information from a device i own running the Quectel RM520 modem, the GL.INET X-3000, connected to a directional antenna (poynting xpol-24).
+This project provides tools for monitoring and configuring Quectel 5G modems, originally developed for the GL.INET X-3000 with Quectel RM520N-GL modem and Poynting XPOL-24 directional antenna.
 
-My goal is to extract as much information as possible from the modem on the currently serving cell and also aggregated bands, to be used as a tool to aid accurate pointing of the directional antenna. The '5g-monitor.py' script, written in python, queries the network name, serving cell and carrier aggregated cells to print a summary of the signal strength, quality and signal-to-noise ratio.
+The goal is to extract signal information from the modem to aid accurate pointing of directional antennas, with audio feedback based on 5G SINR values.
 
-The script also emits beeps driven by the 5G SINR value, so to be useful to be used while moving the antenna without needing to look at the screen.
+## Project Status
 
-# Goals of this project
+**IMPLEMENTED** - The following components have been created:
 
-The script is written in python and thus requires a user to add python packages to their installation, that may not be exactly desirable. Considering that on OpenWRT on which the GL-X3000 is built already has lua pre-installed, we should first consider whether it makes sense to rewrite it all in Lua. However, we must also consider all the other goals.
+- `src/quectel/` - Python library for modem communication and AT command parsing
+- `bin/5g-info` - CLI tool for displaying modem info (table/JSON output)
+- `bin/5g-monitor` - ncurses TUI with color-coded signals and beep feedback
+- `bin/5g-http.cgi` - CGI script for JSON API
+- `bin/at` - Simple AT command wrapper
+- `bin/force-bands` - Band locking utility
 
-I want to create a re-usable library to parse the Quectel modem strings. Currently the python script does brutal string splits and replaces to obtain the goal, and it just does a set of print() followed by a system("clear") that a bit ugly. In the rewrite, I'd like to establish:
+See `README.md` for usage documentation.
 
-- An ergonomic wrapper to parse the output of the AT commands. This wrapper should be composed of multiple classes, one for each data type, and should have methods that invoke modem commands and return lists of appropriate hydrated instances, for easy decoding
+## Key Decisions
 
-- A CLI interface named '5g-info', that just prints the information once in a list and maybe a JSON format
+- **Language**: Python 3 (chosen for portability beyond OpenWRT and rich ncurses support)
+- **Modem communication**: Supports both `gl_modem` wrapper and direct pyserial
+- **Audio feedback**: Terminal bell (`\a`) for SSH compatibility
+- **HTTP**: uhttpd CGI integration, no auth in v1
 
-- A TUI interface named '5g-monitor' that does what currently the 5g-monitor.py python script does (printing the information nicely every X seconds) but using ncurses and possibly 256-color output. The choice of the colors depending on the values should be dicated by the thresholds described in the official Quectel documentation. Color coding is the standard red=bad, yellow=fair, green=good, cyan=excellent.
+## Legacy Files
 
-- I want to improve the '5g-monitor' over the current python by adding also the scanning of neighbouring cells, currently in the `5g-scan.py` script. This code should provide the end user an holistic view of all the neighbouring cells, with the hints required to understand whether it makes sense or not to try to move the antenna to target them.
+The following files are from the original prototype and can be removed:
 
-- An HTTP JSON interface, named 5g-http to be integrated in LuCI, so that I can then poll for this data from an external service and collect it and store it for statistics purposes.
+- `5g-monitor.py` - replaced by `bin/5g-monitor`
+- `5g-scan.py` - functionality merged into `bin/5g-monitor`
 
-- A couple of utilities to query the modem, such as the "at" one to send custom AT commands to the modem and the `force_bands.sh` to lock the modem on specific bands.
+## Configuration
 
-- If possible, a very tiny wrapper that interacts directly with the modem without forking to `gl_modem`. But if this becomes too complicated or relies on too much undocumented interfaces, let's just use `gl_modem` that's not a big deal.
+Default config: `/etc/quectel/config.json` or `config/quectel.json`
 
-- A configuration file e.g. for the modem BUS that should be shared by all of these components, integrated in the UCI framework but with sane defaults for the X-3000. We will start using this on the X-3000 but I don't want to scope this project only to this specific device.
+On OpenWRT, UCI config (`uci get quectel.@modem[0].*`) overlays JSON settings.
 
-All of this should be written in Lua as I guess it's the easier path forward to integrate it nicely in the OpenWRT ecosystem.
+## Sample AT Command Outputs
 
-# Engineering
-
-This must be well coded, well understandable, modular and extensible. We should follow closely the documentation in the quectel-rm520n-excerpt.pdf file. That explains what the commands do and what the output means. 
-
-I don't want a quick hack, I want production-grade code that's coded by a veteran. On the other hand, I don't want too layered, over-engineered java style code. It has to be as simple as possible, but not simpler. It must be understandable and not filled with comments. We should use comments only in the most compllicated parts (if ever).
-
-It should follow the principle of the least surprise, and it has to be DRY - Don't Repeat Yourself. Lower-level parsing, common functions, higher level abstractions and wrappers, well formed library and the CLI, TUI and WEB API consumers that use it.
-
-Please do not re-invent any wheels like the current python scripts are doing. We should use every possible pre-built library for terminal control colors etc.
-
-Eventually - do not make mistakes!
-
-# Sample outputs
-
-This is the sample output of running few commmands of interest.
+These sample outputs are used for parser testing:
 
 ```
 ATI
-
 
 Quectel
 RM520N-GL
@@ -57,30 +51,25 @@ Revision: RM520NGLAAR03A03M4G
 OK
 AT+QSPN
 
-
 +QSPN: "I TIM","TIM","",0,"22201"
 
 OK
 AT+QNWPREFCFG="mode_pref"
-
 
 +QNWPREFCFG: "mode_pref",AUTO
 
 OK
 AT+QNWPREFCFG="nsa_nr5g_band"
 
-
 +QNWPREFCFG: "nsa_nr5g_band",78
 
 OK
 AT+QNWPREFCFG="lte_band"
 
-
 +QNWPREFCFG: "lte_band",1:3:7:20
 
 OK
 AT+QCAINFO
-
 
 +QCAINFO: "PCC",275,75,"LTE BAND 1",1,280,-99,-14,-67,-4
 +QCAINFO: "SCC",1350,100,"LTE BAND 3",1,240,-95,-18,-68,-10,0,-,-
@@ -89,14 +78,12 @@ AT+QCAINFO
 OK
 AT+QENG="servingcell"
 
-
 +QENG: "servingcell","NOCONN"
 +QENG: "LTE","FDD",222,01,328261F,280,275,1,4,4,BE3,-99,-14,-66,7,4,30,-
 +QENG: "NR5G-NSA",222,01,920,-96,18,-10,648768,78,10,1
 
 OK
 AT+QENG="neighbourcell"
-
 
 +QENG: "neighbourcell intra","LTE",275,280,-14,-99,-67,-,-,-,-,-,-
 +QENG: "neighbourcell intra","LTE",275,34,-20,-105,-76,-,-,-,-,-,-
@@ -110,6 +97,7 @@ AT+QENG="neighbourcell"
 OK
 ```
 
-# Questions?
+## Documentation
 
-Please ensure to ask any clarification and let's then put answers in this document.
+- `README.md` - User documentation
+- `quectel-rm520n-excerpt.pdf` - Quectel modem AT command reference

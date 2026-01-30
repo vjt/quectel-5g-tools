@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""5g-monitor: TUI monitor for Quectel 5G modem signal."""
+
+import argparse
+import curses
+import sys
+import time
+from typing import List, Optional, Tuple
+
+# Add src to path for development
+sys.path.insert(0, "/usr/lib/python3")
+sys.path.insert(0, str(__file__ and __import__("pathlib").Path(__file__).parent.parent / "src"))
+
+from quectel.config import Config, load_config
+from quectel.frequency import (
+    format_frequency,
+    format_lte_bandwidth,
+    format_nr5g_bandwidth,
+)
+from quectel.models import CarrierComponent, LteServingCell, NeighbourCell, Nr5gServingCell
+from quectel.modem import Modem
+from quectel.thresholds import (
+    SignalQuality,
+    classify_rsrp,
+    classify_rsrq,
+    classify_sinr,
+    sinr_to_beep_count,
+)
+
+
+class MonitorUI:
+    """Curses-based TUI for modem monitoring."""
+
+    def __init__(self, stdscr, modem: Modem, config: Config):
+        self.stdscr = stdscr
+        self.modem = modem
+        self.config = config
+        self.running = True
+        self.beeps_enabled = True
+        self.scroll_offset = 0
+        self.last_refresh = 0.0
+        self.countdown = 0.0
+
+        # Data cache
+        self.device_info = None
+        self.network_info = None
+        self.lte_cell: Optional[LteServingCell] = None
+        self.nr5g_cell: Optional[Nr5gServingCell] = None
+        self.ca_components: List[CarrierComponent] = []
+        self.neighbours: List[NeighbourCell] = []
+        self.last_beep_count = 0
+
+        # Initialize curses
+        curses.curs_set(0)  # Hide cursor
+        curses.start_color()
+        curses.use_default_colors()
+
+        # Define color pairs
+        curses.init_pair(1, curses.COLOR_RED, -1)      # Poor
+        curses.init_pair(2, curses.COLOR_YELLOW, -1)   # Fair
+        curses.init_pair(3, curses.COLOR_GREEN, -1)    # Good
+        curses.init_pair(4, curses.COLOR_CYAN, -1)     # Excellent
+        curses.init_pair(5, curses.COLOR_WHITE, -1)    # Default
+        curses.init_pair(6, curses.COLOR_BLUE, -1)     # Headers
+        curses.init_pair(7, curses.COLOR_MAGENTA, -1)  # Highlight
+
+        self.stdscr.timeout(100)  # 100ms timeout for getch
+
+    def color_for_quality(self, quality: SignalQuality) -> int:
+        return {
+            SignalQuality.POOR: curses.color_pair(1),
+            SignalQuality.FAIR: curses.color_pair(2),
+            SignalQuality.GOOD: curses.color_pair(3),
+            SignalQuality.EXCELLENT: curses.color_pair(4),
+            SignalQuality.UNKNOWN: curses.color_pair(5),
+        }.get(quality, curses.color_pair(5))
+
+    def refresh_data(self):
+        """Fetch fresh data from modem."""
+        try:
+            if self.device_info is None:
+                self.device_info = self.modem.get_device_info()
+            self.network_info = self.modem.get_network_info()
+            self.lte_cell, self.nr5g_cell = self.modem.get_serving_cell()
+            self.ca_components = self.modem.get_carrier_aggregation()
+            self.neighbours = self.modem.get_neighbour_cells()
+        except Exception:
+            pass  # Keep old data on error
+
+        self.last_refresh = time.time()
+        self.countdown = self.config.refresh_interval
+
+    def play_beeps(self, count: int):
+        """Play beep sequence."""
+        if not self.beeps_enabled or count == 0:
+            return
+
+        for _ in range(count):
+            print("\a", end="", flush=True)
+            time.sleep(self.config.beep_interval)
+
+    def draw_header(self, row: int) -> int:
+        """Draw header with device/network info."""
+        h, w = self.stdscr.getmaxyx()
+
+        # Title bar
+        title = " QUECTEL 5G MONITOR "
+        self.stdscr.attron(curses.color_pair(7) | curses.A_BOLD)
+        self.stdscr.addstr(row, 0, "=" * w)
+        self.stdscr.addstr(row, (w - len(title)) // 2, title)
+        self.stdscr.attroff(curses.color_pair(7) | curses.A_BOLD)
+        row += 1
+
+        # Device and network info
+        if self.device_info:
+            device_str = f"{self.device_info.model}"
+        else:
+            device_str = "Unknown Device"
+
+        if self.network_info:
+            network_str = f"{self.network_info.full_name} ({self.network_info.mcc_mnc})"
+        else:
+            network_str = "No Network"
+
+        countdown_str = f"Refresh: {self.countdown:.0f}s"
+        beep_str = f"Beeps: {'ON' if self.beeps_enabled else 'OFF'}"
+
+        info_line = f" {device_str} | {network_str}"
+        status_line = f"{countdown_str} | {beep_str} "
+
+        self.stdscr.addstr(row, 0, info_line[:w-len(status_line)-1])
+        self.stdscr.addstr(row, w - len(status_line) - 1, status_line)
+        row += 1
+
+        self.stdscr.addstr(row, 0, "-" * w)
+        row += 1
+
+        return row
+
+    def draw_serving_cell(self, row: int) -> int:
+        """Draw serving cell information."""
+        h, w = self.stdscr.getmaxyx()
+
+        # LTE section
+        if self.lte_cell:
+            lte = self.lte_cell
+            rsrp_q = classify_rsrp(lte.rsrp)
+            rsrq_q = classify_rsrq(lte.rsrq)
+            sinr_q = classify_sinr(lte.sinr, is_5g=False)
+
+            dl_bw = format_lte_bandwidth(lte.dl_bandwidth_idx)
+            ul_bw = format_lte_bandwidth(lte.ul_bandwidth_idx)
+            freq = format_frequency(lte.earfcn, is_5g=False)
+
+            self.stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
+            self.stdscr.addstr(row, 0, f"[LTE - Band {lte.band}]")
+            self.stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
+            self.stdscr.addstr(row, 16, f" {lte.mode} | eNodeB: {lte.enodeb_id} | PCI: {lte.pci} | TAC: {lte.tac}"[:w-16])
+            row += 1
+
+            self.stdscr.addstr(row, 2, f"BW: DL {dl_bw} / UL {ul_bw} | Freq: {freq}"[:w-2])
+            row += 1
+
+            # Signal line with colors
+            self.stdscr.addstr(row, 2, "Signal: RSRP ")
+            self.stdscr.attron(self.color_for_quality(rsrp_q))
+            self.stdscr.addstr(f"{lte.rsrp}")
+            self.stdscr.attroff(self.color_for_quality(rsrp_q))
+
+            self.stdscr.addstr(" | RSRQ ")
+            self.stdscr.attron(self.color_for_quality(rsrq_q))
+            self.stdscr.addstr(f"{lte.rsrq}")
+            self.stdscr.attroff(self.color_for_quality(rsrq_q))
+
+            self.stdscr.addstr(" | SINR ")
+            self.stdscr.attron(self.color_for_quality(sinr_q))
+            self.stdscr.addstr(f"{lte.sinr}")
+            self.stdscr.attroff(self.color_for_quality(sinr_q))
+
+            if lte.tx_power is not None:
+                self.stdscr.addstr(f" | TX {lte.tx_power:.1f}dBm")
+            row += 1
+        else:
+            self.stdscr.attron(curses.color_pair(1))
+            self.stdscr.addstr(row, 0, "[LTE] NO SIGNAL")
+            self.stdscr.attroff(curses.color_pair(1))
+            row += 1
+
+        row += 1  # Blank line
+
+        # 5G section
+        if self.nr5g_cell:
+            nr = self.nr5g_cell
+            rsrp_q = classify_rsrp(nr.rsrp)
+            rsrq_q = classify_rsrq(nr.rsrq)
+            sinr_q = classify_sinr(nr.sinr, is_5g=True)
+
+            bw = format_nr5g_bandwidth(nr.bandwidth_idx)
+            freq = format_frequency(nr.arfcn, is_5g=True)
+
+            beep_count = sinr_to_beep_count(nr.sinr)
+            self.last_beep_count = beep_count
+
+            self.stdscr.attron(curses.color_pair(3) | curses.A_BOLD)
+            self.stdscr.addstr(row, 0, f"[5G - Band {nr.band}]")
+            self.stdscr.attroff(curses.color_pair(3) | curses.A_BOLD)
+            self.stdscr.addstr(row, 15, f" PCI: {nr.pci} | Beeps: {beep_count}"[:w-15])
+            row += 1
+
+            self.stdscr.addstr(row, 2, f"BW: {bw} | Freq: {freq}"[:w-2])
+            row += 1
+
+            # Signal line with colors
+            self.stdscr.addstr(row, 2, "Signal: RSRP ")
+            self.stdscr.attron(self.color_for_quality(rsrp_q))
+            self.stdscr.addstr(f"{nr.rsrp}")
+            self.stdscr.attroff(self.color_for_quality(rsrp_q))
+
+            self.stdscr.addstr(" | RSRQ ")
+            self.stdscr.attron(self.color_for_quality(rsrq_q))
+            self.stdscr.addstr(f"{nr.rsrq}")
+            self.stdscr.attroff(self.color_for_quality(rsrq_q))
+
+            self.stdscr.addstr(" | SINR ")
+            self.stdscr.attron(self.color_for_quality(sinr_q))
+            self.stdscr.addstr(f"{nr.sinr}")
+            self.stdscr.attroff(self.color_for_quality(sinr_q))
+            row += 1
+        else:
+            self.stdscr.attron(curses.color_pair(1))
+            self.stdscr.addstr(row, 0, "[5G] NO SIGNAL")
+            self.stdscr.attroff(curses.color_pair(1))
+            self.last_beep_count = 0
+            row += 1
+
+        return row
+
+    def draw_carrier_aggregation(self, row: int) -> int:
+        """Draw carrier aggregation table."""
+        h, w = self.stdscr.getmaxyx()
+
+        self.stdscr.addstr(row, 0, "-" * w)
+        row += 1
+
+        self.stdscr.attron(curses.A_BOLD)
+        self.stdscr.addstr(row, 0, "CARRIER AGGREGATION:")
+        self.stdscr.attroff(curses.A_BOLD)
+        row += 1
+
+        if not self.ca_components:
+            self.stdscr.addstr(row, 2, "No carrier aggregation")
+            row += 1
+            return row
+
+        for comp in self.ca_components:
+            if row >= h - 4:
+                break
+
+            is_5g = comp.is_5g
+            if is_5g:
+                bw = format_nr5g_bandwidth(comp.bandwidth_raw)
+                freq = format_frequency(comp.earfcn, is_5g=True)
+            else:
+                bw = format_lte_bandwidth(comp.bandwidth_raw, from_qcainfo=True)
+                freq = format_frequency(comp.earfcn, is_5g=False)
+
+            rsrp_str = f"{comp.rsrp:4}" if comp.rsrp is not None else "   -"
+            sinr_str = f"{comp.sinr:4}" if comp.sinr is not None else "   -"
+            state_str = f"[{comp.state}]" if comp.state else ""
+
+            col = curses.color_pair(6) if comp.component_type == "PCC" else curses.color_pair(4)
+
+            self.stdscr.attron(col)
+            self.stdscr.addstr(row, 2, f"{comp.component_type:3}")
+            self.stdscr.attroff(col)
+
+            line = f" {comp.band_name:12} PCI {comp.pci:3} RSRP {rsrp_str} SINR {sinr_str} {bw:7} {freq} {state_str}"
+            self.stdscr.addstr(row, 5, line[:w-5])
+            row += 1
+
+        return row
+
+    def draw_neighbours(self, row: int) -> int:
+        """Draw neighbour cells list."""
+        h, w = self.stdscr.getmaxyx()
+
+        self.stdscr.addstr(row, 0, "-" * w)
+        row += 1
+
+        self.stdscr.attron(curses.A_BOLD)
+        self.stdscr.addstr(row, 0, f"NEIGHBOUR CELLS ({len(self.neighbours)}):")
+        self.stdscr.attroff(curses.A_BOLD)
+        row += 1
+
+        if not self.neighbours:
+            self.stdscr.addstr(row, 2, "No neighbours detected")
+            row += 1
+            return row
+
+        # Calculate visible range
+        max_visible = h - row - 2
+        visible_cells = self.neighbours[self.scroll_offset:self.scroll_offset + max_visible]
+
+        for cell in visible_cells:
+            if row >= h - 2:
+                break
+
+            rsrp_q = classify_rsrp(cell.rsrp)
+            freq = format_frequency(cell.earfcn, is_5g=False)
+
+            self.stdscr.addstr(row, 2, f"{cell.technology} ")
+            self.stdscr.addstr(f"{freq:20} PCI {cell.pci:3} RSRP ")
+
+            self.stdscr.attron(self.color_for_quality(rsrp_q))
+            self.stdscr.addstr(f"{cell.rsrp:4}")
+            self.stdscr.attroff(self.color_for_quality(rsrp_q))
+
+            self.stdscr.addstr(f" RSRQ {cell.rsrq:3} ({cell.cell_type})")
+            row += 1
+
+        # Scroll indicator
+        if len(self.neighbours) > max_visible:
+            indicator = f"[{self.scroll_offset + 1}-{min(self.scroll_offset + max_visible, len(self.neighbours))}/{len(self.neighbours)}]"
+            self.stdscr.addstr(row, w - len(indicator) - 1, indicator)
+
+        return row
+
+    def draw_footer(self, row: int):
+        """Draw footer with help."""
+        h, w = self.stdscr.getmaxyx()
+        footer = " q:Quit  r:Refresh  b:Beeps  j/k:Scroll "
+        self.stdscr.attron(curses.color_pair(7))
+        self.stdscr.addstr(h - 1, 0, footer + " " * (w - len(footer)))
+        self.stdscr.attroff(curses.color_pair(7))
+
+    def draw(self):
+        """Draw the complete UI."""
+        self.stdscr.clear()
+        h, w = self.stdscr.getmaxyx()
+
+        if h < 10 or w < 40:
+            self.stdscr.addstr(0, 0, "Terminal too small")
+            self.stdscr.refresh()
+            return
+
+        try:
+            row = 0
+            row = self.draw_header(row)
+            row = self.draw_serving_cell(row)
+            row = self.draw_carrier_aggregation(row)
+            row = self.draw_neighbours(row)
+            self.draw_footer(row)
+        except curses.error:
+            pass  # Ignore drawing errors at edge of screen
+
+        self.stdscr.refresh()
+
+    def handle_input(self) -> bool:
+        """Handle keyboard input. Returns False to quit."""
+        try:
+            key = self.stdscr.getch()
+        except curses.error:
+            return True
+
+        if key == ord("q") or key == ord("Q"):
+            return False
+        elif key == ord("r") or key == ord("R"):
+            self.refresh_data()
+        elif key == ord("b") or key == ord("B"):
+            self.beeps_enabled = not self.beeps_enabled
+        elif key == ord("j") or key == curses.KEY_DOWN:
+            if self.scroll_offset < len(self.neighbours) - 1:
+                self.scroll_offset += 1
+        elif key == ord("k") or key == curses.KEY_UP:
+            if self.scroll_offset > 0:
+                self.scroll_offset -= 1
+        elif key == curses.KEY_RESIZE:
+            curses.endwin()
+            self.stdscr.refresh()
+
+        return True
+
+    def run(self):
+        """Main run loop."""
+        self.refresh_data()
+
+        while self.running:
+            # Update countdown
+            elapsed = time.time() - self.last_refresh
+            self.countdown = max(0, self.config.refresh_interval - elapsed)
+
+            # Refresh data if needed
+            if elapsed >= self.config.refresh_interval:
+                self.refresh_data()
+                # Play beeps after refresh
+                if self.beeps_enabled and self.last_beep_count > 0:
+                    self.play_beeps(self.last_beep_count)
+
+            self.draw()
+
+            if not self.handle_input():
+                break
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Real-time Quectel 5G modem monitor",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        help="Path to config file",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        help="Refresh interval in seconds (overrides config)",
+    )
+    parser.add_argument(
+        "--no-beep",
+        action="store_true",
+        help="Disable beeps",
+    )
+
+    args = parser.parse_args()
+
+    try:
+        config = load_config(args.config)
+        if args.interval:
+            config.refresh_interval = args.interval
+        modem = Modem.from_config(config)
+    except Exception as e:
+        print(f"Error connecting to modem: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    def run_ui(stdscr):
+        ui = MonitorUI(stdscr, modem, config)
+        if args.no_beep:
+            ui.beeps_enabled = False
+        ui.run()
+
+    try:
+        curses.wrapper(run_ui)
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

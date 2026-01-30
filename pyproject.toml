@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quectel-5g-tools"
+version = "0.1.0"
+description = "Tools for interfacing with Quectel 5G modems"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "you@example.com"}
+]
+keywords = ["quectel", "5g", "modem", "lte", "monitoring"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Console :: Curses",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Telecommunications Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Networking :: Monitoring",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "pyserial>=3.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "black",
+    "isort",
+    "mypy",
+]
+
+[project.scripts]
+5g-info = "quectel.cli.info:main"
+5g-monitor = "quectel.cli.monitor:main"
+at = "quectel.cli.at:main"
+force-bands = "quectel.cli.force_bands:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/quectel-5g-tools"
+Repository = "https://github.com/yourusername/quectel-5g-tools.git"
+Issues = "https://github.com/yourusername/quectel-5g-tools/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.black]
+line-length = 100
+target-version = ["py38"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
