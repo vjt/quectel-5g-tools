@@ -14,11 +14,13 @@ I want to create a re-usable library to parse the Quectel modem strings. Current
 
 - An ergonomic wrapper to parse the output of the AT commands. This wrapper should be composed of multiple classes, one for each data type, and should have methods that invoke modem commands and return lists of appropriate hydrated instances, for easy decoding
 
-- A CLI interface, that just prints the information once in a list and maybe a JSON format
+- A CLI interface named '5g-info', that just prints the information once in a list and maybe a JSON format
 
-- A TUI interface, that does what currently the python script does (printing the information nicely every X seconds) but using ncurses and possibly 256-color output. The choice of the colors and thresholds should be dicated by the ranges described in the official Quectel documentation
+- A TUI interface named '5g-monitor' that does what currently the 5g-monitor.py python script does (printing the information nicely every X seconds) but using ncurses and possibly 256-color output. The choice of the colors depending on the values should be dicated by the thresholds described in the official Quectel documentation. Color coding is the standard red=bad, yellow=fair, green=good, cyan=excellent.
 
-- An HTTP JSON interface, to be integrated in LuCI, so that I can then poll for this data from an external service and collect it and store it for statistics purposes.
+- I want to improve the '5g-monitor' over the current python by adding also the scanning of neighbouring cells, currently in the `5g-scan.py` script. This code should provide the end user an holistic view of all the neighbouring cells, with the hints required to understand whether it makes sense or not to try to move the antenna to target them.
+
+- An HTTP JSON interface, named 5g-http to be integrated in LuCI, so that I can then poll for this data from an external service and collect it and store it for statistics purposes.
 
 - A couple of utilities to query the modem, such as the "at" one to send custom AT commands to the modem and the `force_bands.sh` to lock the modem on specific bands.
 
@@ -35,6 +37,10 @@ This must be well coded, well understandable, modular and extensible. We should 
 I don't want a quick hack, I want production-grade code that's coded by a veteran. On the other hand, I don't want too layered, over-engineered java style code. It has to be as simple as possible, but not simpler. It must be understandable and not filled with comments. We should use comments only in the most compllicated parts (if ever).
 
 It should follow the principle of the least surprise, and it has to be DRY - Don't Repeat Yourself. Lower-level parsing, common functions, higher level abstractions and wrappers, well formed library and the CLI, TUI and WEB API consumers that use it.
+
+Please do not re-invent any wheels like the current python scripts are doing. We should use every possible pre-built library for terminal control colors etc.
+
+Eventually - do not make mistakes!
 
 # Sample outputs
 

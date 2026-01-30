@@ -36,10 +36,9 @@ def run_at_cmd():
 def parse_and_print(raw_data):
     os.system('clear')
     print(f"{C.HEADER}{C.BOLD}--- RADAR TORRI 5G/4G [LIVE MONITOR] ---{C.ENDC}")
-    print(f"{C.HEADER}Target ideale: PCI 280 (B1) | Aggiornamento ogni {REFRESH_SEC}s{C.ENDC}")
     print(f"{C.OKCYAN}" + "-"*70 + f"{C.ENDC}")
     # Intestazione corretta in base al tuo output: Prima RSRQ, poi RSRP
-    print(f"{C.BOLD}{'BANDA':<8} | {'PCI':<6} | {'RSRP (Potenza)':<15} | {'RSRQ (Qualità)':<15} | {'DISTANZA?'}{C.ENDC}")
+    print(f"{C.BOLD}{'BANDA':<8}  | {'PCI':<6} | {'RSRP (Potenza)':<15} | {'RSRQ (Qualità)':<15} |{C.ENDC}")
     print(f"{C.OKCYAN}" + "-"*70 + f"{C.ENDC}")
 
     if not raw_data or "TIMEOUT" in raw_data:
@@ -83,13 +82,7 @@ def parse_and_print(raw_data):
             if rsrp > -95: color = C.OKGREEN # Ottimo
             elif rsrp > -105: color = C.WARNING # Medio
             
-            # Highlight speciale per il TARGET (PCI 280)
-            status_icon = ""
-            if pci == "280":
-                status_icon = " <--- TARGET"
-                color = C.OKCYAN + C.BOLD # Blu elettrico per il target
-
-            print(f"{color}{band_name:<8} | {pci:<6} | {str(rsrp) + ' dBm':<15} | {str(rsrq) + ' dB':<15} | {status_icon}{C.ENDC}")
+            print(f"{color}{band_name:<8} | {pci:<6} | {str(rsrp) + ' dBm':<15} | {str(rsrq) + ' dB':<15} | {C.ENDC}")
             found = True
 
         except Exception as e:
