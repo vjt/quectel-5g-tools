@@ -22,7 +22,21 @@ Install dependencies:
 opkg install python3-pyserial python3-toml python3-ncurses
 ```
 
-Now you can run the binaries in the ./bin directory directly.
+Now you can run the binaries in the `./bin` directory directly.
+
+Example:
+
+```
+./bin/5g-info
+```
+![](doc/5g-info.png)
+
+```
+./bin/5g-monitor
+```
+![](doc/5g-monitor.png)
+
+Hear it beep! 🛎️
 
 ## Installation
 
@@ -39,7 +53,6 @@ cd /path/to/quectel-5g-tools
 cp -r src/quectel /usr/lib/python3/
 cp bin/* /usr/bin/
 cp bin/5g-http.cgi /www/cgi-bin/
-mkdir -p /etc/quectel
 cp config/quectel.uci /etc/config/quectel
 ```
 
