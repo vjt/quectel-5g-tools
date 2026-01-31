@@ -32,7 +32,7 @@ classifiers = [
 requires-python = ">=3.8"
 dependencies = [
     "pyserial>=3.4",
-    "tomli>=2.0; python_version < '3.11'",
+    "toml>=0.10",
 ]
 
 [project.optional-dependencies]

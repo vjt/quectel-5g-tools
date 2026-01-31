@@ -12,13 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-try:
-    import tomllib  # Python 3.11+
-except ImportError:
-    try:
-        import tomli as tomllib  # Fallback for Python < 3.11
-    except ImportError:
-        tomllib = None  # TOML support not available
+import toml
 
 
 DEFAULT_CONFIG_PATHS = [
@@ -106,9 +100,6 @@ def _uci_get_list(key: str) -> Optional[List[str]]:
 
 def _load_from_toml(config_path: Optional[str]) -> dict:
     """Load configuration from TOML file."""
-    if tomllib is None:
-        return {}
-
     paths_to_try = [config_path] if config_path else DEFAULT_CONFIG_PATHS
 
     for path in paths_to_try:
@@ -117,8 +108,7 @@ def _load_from_toml(config_path: Optional[str]) -> dict:
         expanded = Path(path).expanduser()
         if expanded.exists():
             try:
-                with open(expanded, "rb") as f:
-                    return tomllib.load(f)
+                return toml.load(expanded)
             except Exception:
                 continue
 
