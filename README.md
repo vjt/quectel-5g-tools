@@ -26,7 +26,8 @@ cp -r src/quectel /usr/lib/python3/
 cp bin/* /usr/bin/
 cp bin/5g-http.cgi /www/cgi-bin/
 mkdir -p /etc/quectel
-cp config/quectel.json /etc/quectel/
+cp config/quectel.toml /etc/quectel/config.toml
+cp config/quectel.uci /etc/config/quectel
 ```
 
 ### On other Linux systems
@@ -35,6 +36,60 @@ cp config/quectel.json /etc/quectel/
 pip install .
 # or for development
 pip install -e .
+```
+
+## Development
+
+### Setting up a virtual environment
+
+For development and testing, use a virtual environment to keep dependencies isolated:
+
+```bash
+# Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install the package in editable mode with dev dependencies
+pip install -e ".[dev]"
+
+# Now you can run tools directly
+5g-info --help
+5g-monitor --help
+
+# Deactivate when done
+deactivate
+```
+
+### Running tests
+
+Tests require pytest. Use a virtual environment to avoid polluting your system:
+
+```bash
+# Quick setup and run tests
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
+
+# Or run specific tests
+pytest tests/test_frequency.py -v
+pytest tests/test_parser.py -v
+
+# With coverage
+pytest --cov=quectel --cov-report=term-missing
+
+# Deactivate when done
+deactivate
+```
+
+Alternatively, run tests without installing (but you still need pytest):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install pytest
+PYTHONPATH=src pytest tests/ -v
+deactivate
 ```
 
 ## Usage
