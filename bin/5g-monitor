@@ -35,7 +35,6 @@ class MonitorUI:
         self.stdscr = stdscr
         self.modem = modem
         self.config = config
-        self.running = True
         self.beeps_enabled = True
         self.scroll_offset = 0
         self.last_refresh = 0.0
@@ -64,7 +63,7 @@ class MonitorUI:
         curses.init_pair(6, curses.COLOR_BLUE, -1)     # Headers
         curses.init_pair(7, curses.COLOR_MAGENTA, -1)  # Highlight
 
-        self.stdscr.timeout(100)  # 100ms timeout for getch
+        self.stdscr.timeout(250)  # 250ms timeout for getch
 
     def color_for_quality(self, quality: SignalQuality) -> int:
         return {
@@ -382,17 +381,13 @@ class MonitorUI:
 
     def run(self):
         """Main run loop."""
-        self.refresh_data()
-
-        while self.running:
-            # Update countdown
+        while True:
             elapsed = time.time() - self.last_refresh
             self.countdown = max(0, self.config.refresh_interval - elapsed)
 
-            # Refresh data if needed
             if elapsed >= self.config.refresh_interval:
                 self.refresh_data()
-                # Play beeps after refresh
+
                 if self.beeps_enabled and self.last_beep_count > 0:
                     self.play_beeps(self.last_beep_count)
 
@@ -400,7 +395,6 @@ class MonitorUI:
 
             if not self.handle_input():
                 break
-
 
 def main():
     parser = argparse.ArgumentParser(
