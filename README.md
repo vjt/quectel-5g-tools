@@ -12,6 +12,18 @@ Originally developed for the GL.INET X-3000 with Quectel RM520N-GL modem and Poy
 - **at**: Simple AT command wrapper
 - **force-bands**: Utility to lock modem to specific bands
 
+## Trying it out
+
+Check out the repo and `cd` into it.
+
+Install dependencies:
+
+```
+opkg install python3-pyserial python3-toml python3-ncurses
+```
+
+Now you can run the binaries in the ./bin directory directly.
+
 ## Installation
 
 ### On OpenWRT
@@ -21,12 +33,13 @@ Originally developed for the GL.INET X-3000 with Quectel RM520N-GL modem and Poy
 opkg install quectel-5g-tools
 
 # From source
+
+```
 cd /path/to/quectel-5g-tools
 cp -r src/quectel /usr/lib/python3/
 cp bin/* /usr/bin/
 cp bin/5g-http.cgi /www/cgi-bin/
 mkdir -p /etc/quectel
-cp config/quectel.toml /etc/quectel/config.toml
 cp config/quectel.uci /etc/config/quectel
 ```
 
