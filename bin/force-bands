@@ -44,6 +44,12 @@ def main():
         help="Verify settings after applying",
     )
 
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Show current settings",
+    )
+
     args = parser.parse_args()
 
     if args.wait > 0:
@@ -78,23 +84,23 @@ def main():
         nr5g_bands = None
 
     # Apply settings
-    if lte_bands:
-        print(f"Setting LTE bands: {lte_bands}")
+    if lte_bands and not args.status:
+        message = f"Setting LTE bands: {lte_bands}"
         if modem.set_lte_bands(lte_bands):
-            print("  OK")
+            print(f"{message}: OK")
         else:
-            print("  FAILED", file=sys.stderr)
+            print("{message}: FAILED", file=sys.stderr)
 
-    if nr5g_bands:
-        print(f"Setting NR5G bands: {nr5g_bands}")
+    if nr5g_bands and not args.status:
+        message = f"Setting NR5G bands: {nr5g_bands}"
         if modem.set_nr5g_bands(nr5g_bands):
-            print("  OK")
+            print(f"{message}: OK")
         else:
-            print("  FAILED", file=sys.stderr)
+            print(f"{message}: FAILED", file=sys.stderr)
 
     # Verify if requested
-    if args.verify:
-        print("\nVerifying settings:")
+    if args.verify or args.status:
+        print("Current settings:")
         band_config = modem.get_band_config()
         for key, value in band_config.items():
             print(f"  {key}: {value}")
