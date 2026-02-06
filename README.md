@@ -1,6 +1,6 @@
 # quectel-5g-tools
 
-Tools for monitoring and configuring Quectel 5G modems on OpenWRT and Linux systems.
+Tools for monitoring and configuring Quectel 5G modems on OpenWRT.
 
 Originally developed for the GL.INET X-3000 with Quectel RM520N-GL modem and Poynting XPOL-24 directional antenna.
 
@@ -8,114 +8,50 @@ Originally developed for the GL.INET X-3000 with Quectel RM520N-GL modem and Poy
 
 - **5g-info**: CLI tool for displaying modem information (table and JSON output)
 - **5g-monitor**: Real-time TUI monitor with color-coded signal quality and audio feedback
-- **5g-http.cgi**: CGI script for JSON API (LuCI/uhttpd integration)
+- **Prometheus exporter**: Metrics for Grafana dashboards
 - **at**: Simple AT command wrapper
 - **force-bands**: Utility to lock modem to specific bands
 
-## Trying it out
+## Quick Start
 
-Check out the repo and `cd` into it.
+Install dependencies on OpenWRT:
 
-Install dependencies:
-
-```
-opkg install python3-pyserial python3-toml python3-ncurses
+```bash
+opkg install luaposix
 ```
 
-Now you can run the binaries in the `./bin` directory directly.
+Clone the repo and run directly:
 
-Example:
-
-```
+```bash
+git clone https://github.com/vjt/quectel-5g-tools.git
+cd quectel-5g-tools
 ./bin/5g-info
 ```
+
 ![](doc/5g-info.png)
 
-```
+```bash
 ./bin/5g-monitor
 ```
+
 ![](doc/5g-monitor.png)
 
-Hear it beep! 🛎️
+Hear it beep!
 
 ## Installation
 
-### On OpenWRT
-
 ```bash
-# From opkg (when published)
-opkg install quectel-5g-tools
+# Install Lua library
+cp -r lua/quectel /usr/lib/lua/
 
-# From source
-
-```
-cd /path/to/quectel-5g-tools
-cp -r src/quectel /usr/lib/python3/
+# Install CLI tools
 cp bin/* /usr/bin/
-cp bin/5g-http.cgi /www/cgi-bin/
+
+# Install Prometheus collector (optional)
+cp lua/prometheus-collectors/quectel.lua /usr/lib/lua/prometheus-collectors/
+
+# Install UCI config
 cp config/quectel.uci /etc/config/quectel
-```
-
-### On other Linux systems
-
-```bash
-pip install .
-# or for development
-pip install -e .
-```
-
-## Development
-
-### Setting up a virtual environment
-
-For development and testing, use a virtual environment to keep dependencies isolated:
-
-```bash
-# Create and activate virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install the package in editable mode with dev dependencies
-pip install -e ".[dev]"
-
-# Now you can run tools directly
-5g-info --help
-5g-monitor --help
-
-# Deactivate when done
-deactivate
-```
-
-### Running tests
-
-Tests require pytest. Use a virtual environment to avoid polluting your system:
-
-```bash
-# Quick setup and run tests
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-pytest
-
-# Or run specific tests
-pytest tests/test_frequency.py -v
-pytest tests/test_parser.py -v
-
-# With coverage
-pytest --cov=quectel --cov-report=term-missing
-
-# Deactivate when done
-deactivate
-```
-
-Alternatively, run tests without installing (but you still need pytest):
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install pytest
-PYTHONPATH=src pytest tests/ -v
-deactivate
 ```
 
 ## Usage
@@ -145,44 +81,55 @@ Keyboard controls:
 - `q` - Quit
 - `r` - Refresh now
 - `b` - Toggle beeps
-- `j`/`k` - Scroll neighbours
-
-### HTTP API
-
-When installed on OpenWRT with uhttpd:
-
-```bash
-curl http://router/cgi-bin/5g-http.cgi?action=status
-curl http://router/cgi-bin/5g-http.cgi?action=serving
-curl http://router/cgi-bin/5g-http.cgi?action=ca
-curl http://router/cgi-bin/5g-http.cgi?action=neighbours
-```
 
 ### Band locking
 
 ```bash
-force-bands --lte 1,3,7,20 --nr5g 78 --verify
+force-bands --lte 1:3:7:20 --nr5g 78    # Lock to specific bands
+force-bands --verify                     # Show current config
+force-bands --reset                      # Reset to all bands
 ```
+
+### AT commands
+
+```bash
+at                          # Run default info commands
+at ATI                      # Single command
+at AT+CSQ 'AT+CREG?'        # Multiple commands
+```
+
+## Prometheus Metrics
+
+Install the collector to `/usr/lib/lua/prometheus-collectors/quectel.lua` and it will be picked up by `prometheus-node-exporter-lua`.
+
+Exported metrics:
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| modem_info | model, revision, imei, operator, mcc_mnc | Static modem info (always 1) |
+| modem_cell_state | role, rat, band, pci, enodeb, cell_id | Connected cells (1=active) |
+| modem_signal_rsrp_dbm | role, rat, band, pci | Signal strength |
+| modem_signal_rsrq_db | role, rat, band, pci | Signal quality |
+| modem_signal_sinr_db | role, rat, band, pci | SINR |
+| modem_frequency_mhz | role, rat, band, pci | Carrier frequency |
+| modem_bandwidth_mhz | role, rat, band, pci, direction | Bandwidth |
+| modem_neighbour_rsrp_dbm | rat, band, pci, earfcn | Neighbour cell signals |
 
 ## Configuration
 
-Default config: `/etc/quectel/config.toml`
+UCI config: `/etc/config/quectel`
 
-```toml
-[modem]
-# Serial device for AT commands (Quectel modems typically use ttyUSB2)
-device = "/dev/ttyUSB2"
-baudrate = 115200
-timeout = 2.0
-
-[monitor]
-refresh_interval = 5.0
-beep_interval = 0.6
-beeps_enabled = true
-
-[bands]
-lte = [1, 3, 7, 20]
-nr5g = [78]
+```
+config modem 'modem'
+    option device '/dev/ttyUSB2'
+    option timeout '2'
+    option refresh_interval '5'
+    option beeps_enabled '1'
+    list lte_bands '1'
+    list lte_bands '3'
+    list lte_bands '7'
+    list lte_bands '20'
+    list nr5g_bands '78'
 ```
 
 ## Signal Quality Thresholds
@@ -197,23 +144,30 @@ nr5g = [78]
 
 ```
 quectel-5g-tools/
-├── src/quectel/           # Python library
-│   ├── models.py          # Data classes
-│   ├── parser.py          # AT response parsers
-│   ├── modem.py           # Modem backends
-│   ├── config.py          # Configuration
-│   ├── thresholds.py      # Signal quality thresholds
-│   └── frequency.py       # EARFCN conversion
-├── bin/                   # Executables
+├── lua/
+│   ├── quectel/                    # Core Lua library
+│   │   ├── init.lua                # Main API
+│   │   ├── modem.lua               # Serial communication
+│   │   ├── parser.lua              # AT response parsing
+│   │   ├── frequency.lua           # EARFCN conversion
+│   │   └── thresholds.lua          # Signal quality
+│   └── prometheus-collectors/
+│       └── quectel.lua             # Prometheus exporter
+├── bin/                            # CLI tools
 │   ├── 5g-info
 │   ├── 5g-monitor
-│   ├── 5g-http.cgi
 │   ├── at
 │   └── force-bands
-├── config/                # Default config
-├── tests/                 # Unit tests
-└── openwrt/               # OpenWRT packaging
+├── config/
+│   └── quectel.uci                 # UCI config
+├── doc/                            # Screenshots
+└── legacy/                         # Python implementation (archived)
 ```
+
+## Dependencies
+
+- **luaposix**: Required for serial I/O and ncurses TUI
+- **prometheus-node-exporter-lua**: Optional, for Prometheus metrics
 
 ## License
 

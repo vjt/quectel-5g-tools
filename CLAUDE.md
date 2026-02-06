@@ -1,17 +1,17 @@
 # Overview
 
-This project provides tools for monitoring and configuring Quectel 5G modems, originally developed for the GL.INET X-3000 with Quectel RM520N-GL modem and Poynting XPOL-24 directional antenna.
+Tools for monitoring and configuring Quectel 5G modems on OpenWRT, originally developed for the GL.INET X-3000 with Quectel RM520N-GL modem and Poynting XPOL-24 directional antenna.
 
 The goal is to extract signal information from the modem to aid accurate pointing of directional antennas, with audio feedback based on 5G SINR values.
 
 ## Project Status
 
-**IMPLEMENTED** - The following components have been created:
+**IMPLEMENTED** in Lua:
 
-- `src/quectel/` - Python library for modem communication and AT command parsing
+- `lua/quectel/` - Core library for modem communication and AT command parsing
+- `lua/prometheus-collectors/quectel.lua` - Prometheus metrics exporter
 - `bin/5g-info` - CLI tool for displaying modem info (table/JSON output)
 - `bin/5g-monitor` - ncurses TUI with color-coded signals and beep feedback
-- `bin/5g-http.cgi` - CGI script for JSON API
 - `bin/at` - Simple AT command wrapper
 - `bin/force-bands` - Band locking utility
 
@@ -19,23 +19,32 @@ See `README.md` for usage documentation.
 
 ## Key Decisions
 
-- **Language**: Python 3 (chosen for portability beyond OpenWRT and rich ncurses support)
-- **Modem communication**: Supports both `gl_modem` wrapper and direct pyserial
+- **Language**: Lua (native to OpenWRT, no external deps except luaposix)
+- **Modem communication**: Direct serial via luaposix
+- **Configuration**: UCI only (`/etc/config/quectel`)
 - **Audio feedback**: Terminal bell (`\a`) for SSH compatibility
-- **HTTP**: uhttpd CGI integration, no auth in v1
+- **Metrics**: Prometheus exporter for Grafana integration
 
-## Legacy Files
+## Legacy Python Implementation
 
-The following files are from the original prototype and can be removed:
-
-- `5g-monitor.py` - replaced by `bin/5g-monitor`
-- `5g-scan.py` - functionality merged into `bin/5g-monitor`
+The original Python implementation is preserved in `legacy/` for reference. See `legacy/README.md` for why we switched to Lua.
 
 ## Configuration
 
-Default config: `/etc/quectel/config.json` or `config/quectel.json`
+UCI config: `/etc/config/quectel`
 
-On OpenWRT, UCI config (`uci get quectel.@modem[0].*`) overlays JSON settings.
+```
+config modem 'modem'
+    option device '/dev/ttyUSB2'
+    option timeout '2'
+    option refresh_interval '5'
+    option beeps_enabled '1'
+    list lte_bands '1'
+    list lte_bands '3'
+    list lte_bands '7'
+    list lte_bands '20'
+    list nr5g_bands '78'
+```
 
 ## Sample AT Command Outputs
 
@@ -100,4 +109,4 @@ OK
 ## Documentation
 
 - `README.md` - User documentation
-- `quectel-rm520n-excerpt.pdf` - Quectel modem AT command reference
+- `doc/quectel-rm520n-excerpt.pdf` - Quectel modem AT command reference
