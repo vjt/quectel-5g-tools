@@ -1,8 +1,19 @@
 #!/usr/bin/env lua
 -- Test script for the Prometheus collector
 -- Run this directly to see what metrics would be emitted
+--
+-- Requires: luaposix (available on OpenWRT/router)
 
-package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
+package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;lua/?.lua;lua/?/init.lua;" .. package.path
+
+-- Check for required dependencies
+local ok, _ = pcall(require, "posix")
+if not ok then
+    print("=== Testing Prometheus Collector ===")
+    print("")
+    print("SKIPPED: luaposix not available (run on router)")
+    os.exit(0)
+end
 
 -- Mock metric function that prints what it receives
 local function mock_metric(name, type, labels, value)

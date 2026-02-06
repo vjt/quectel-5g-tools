@@ -1,0 +1,40 @@
+#!/bin/sh
+# Run all tests
+# Usage: ./tests/run-all
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
+echo "========================================"
+echo "Running all tests"
+echo "========================================"
+echo ""
+
+PASSED=0
+FAILED=0
+
+# Find and run all test scripts
+for test_script in tests/test-*; do
+    if [ -f "$test_script" ] && [ -x "$test_script" ]; then
+        name=$(basename "$test_script")
+        echo "--- $name ---"
+        if lua "$test_script"; then
+            PASSED=$((PASSED + 1))
+            echo ""
+        else
+            FAILED=$((FAILED + 1))
+            echo "[FAILED]"
+            echo ""
+        fi
+    fi
+done
+
+echo "========================================"
+echo "Summary: $PASSED passed, $FAILED failed"
+echo "========================================"
+
+if [ "$FAILED" -gt 0 ]; then
+    exit 1
+fi
