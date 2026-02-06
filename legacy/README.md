@@ -40,16 +40,20 @@ Having one codebase in Lua means:
 
 ## What's Here
 
-- `src/quectel/` - Python library (parser, modem, frequency conversion, etc.)
-- `tests/` - pytest-based unit tests
-- `pyproject.toml` - Python package configuration
+- `python/` - Complete Python implementation
+  - `bin/` - CLI tools (5g-info, 5g-monitor, 5g-http.cgi, at, force-bands)
+  - `src/quectel/` - Python library (parser, modem, frequency conversion, etc.)
+  - `tests/` - pytest-based unit tests
+  - `pyproject.toml` - Python package configuration
+  - `5g-monitor-original.py` - The original prototype script
+  - `5g-scan-original.py` - The original scan script
 
 ## Can I Still Use This?
 
 Yes. The Python code works fine. If you're on a non-OpenWRT system with Python available, you can:
 
 ```bash
-cd legacy
+cd legacy/python
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"

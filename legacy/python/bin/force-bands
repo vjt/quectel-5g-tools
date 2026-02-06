@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""force-bands: Lock Quectel modem to specific bands."""
+
+import argparse
+import sys
+import time
+
+# Add src to path
+sys.path.insert(0, "/usr/lib/python3")
+sys.path.insert(0, str(__file__ and __import__("pathlib").Path(__file__).parent.parent / "src"))
+
+from quectel.config import load_config
+from quectel.modem import Modem, ModemError
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Lock Quectel modem to specific bands",
+    )
+    parser.add_argument(
+        "--lte",
+        type=str,
+        help="LTE bands to lock (comma-separated, e.g., 1,3,7,20)",
+    )
+    parser.add_argument(
+        "--nr5g",
+        type=str,
+        help="NR5G bands to lock (comma-separated, e.g., 78)",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        help="Path to config file",
+    )
+    parser.add_argument(
+        "--wait",
+        type=int,
+        default=0,
+        help="Wait N seconds before applying (for boot scripts)",
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Verify settings after applying",
+    )
+
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Show current settings",
+    )
+
+    args = parser.parse_args()
+
+    if args.wait > 0:
+        print(f"Waiting {args.wait} seconds for modem initialization...")
+        time.sleep(args.wait)
+
+    config = load_config(args.config)
+
+    try:
+        modem = Modem.from_config(config)
+    except ModemError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print(f"Check that the modem is connected and {config.device} is correct.", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Determine bands to set
+    if args.lte:
+        lte_bands = [int(b.strip()) for b in args.lte.split(",")]
+    elif config.lte_bands:
+        lte_bands = config.lte_bands
+    else:
+        lte_bands = None
+
+    if args.nr5g:
+        nr5g_bands = [int(b.strip()) for b in args.nr5g.split(",")]
+    elif config.nr5g_bands:
+        nr5g_bands = config.nr5g_bands
+    else:
+        nr5g_bands = None
+
+    # Apply settings
+    if lte_bands and not args.status:
+        message = f"Setting LTE bands: {lte_bands}"
+        if modem.set_lte_bands(lte_bands):
+            print(f"{message}: OK")
+        else:
+            print("{message}: FAILED", file=sys.stderr)
+
+    if nr5g_bands and not args.status:
+        message = f"Setting NR5G bands: {nr5g_bands}"
+        if modem.set_nr5g_bands(nr5g_bands):
+            print(f"{message}: OK")
+        else:
+            print(f"{message}: FAILED", file=sys.stderr)
+
+    # Verify if requested
+    if args.verify or args.status:
+        print("Current settings:")
+        band_config = modem.get_band_config()
+        for key, value in band_config.items():
+            print(f"  {key}: {value}")
+
+
+if __name__ == "__main__":
+    main()

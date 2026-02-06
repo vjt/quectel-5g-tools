@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""5g-info: CLI tool for displaying Quectel modem information."""
+
+import argparse
+import json
+import sys
+from dataclasses import asdict
+from typing import Any, Dict, List, Optional
+
+# Add src to path for development
+sys.path.insert(0, "/usr/lib/python3")
+sys.path.insert(0, str(__file__ and __import__("pathlib").Path(__file__).parent.parent / "src"))
+
+from quectel.config import load_config
+from quectel.frequency import (
+    format_frequency,
+    format_lte_bandwidth,
+    format_nr5g_bandwidth,
+)
+from quectel.modem import Modem, ModemError
+from quectel.thresholds import (
+    SignalQuality,
+    classify_rsrp,
+    classify_rsrq,
+    classify_sinr,
+)
+
+
+class Colors:
+    """ANSI color codes."""
+
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    WHITE = "\033[97m"
+
+    @classmethod
+    def for_quality(cls, quality: SignalQuality) -> str:
+        return {
+            SignalQuality.EXCELLENT: cls.CYAN,
+            SignalQuality.GOOD: cls.GREEN,
+            SignalQuality.FAIR: cls.YELLOW,
+            SignalQuality.POOR: cls.RED,
+            SignalQuality.UNKNOWN: cls.WHITE,
+        }.get(quality, cls.WHITE)
+
+
+def quality_str(quality: SignalQuality) -> str:
+    """Format signal quality as colored string."""
+    color = Colors.for_quality(quality)
+    return f"{color}{quality.value}{Colors.RESET}"
+
+
+def print_device_info(modem: Modem, use_color: bool = True) -> Dict[str, Any]:
+    """Print device information."""
+    info = modem.get_device_info()
+    if not info:
+        print("Device info: unavailable")
+        return {}
+
+    print(f"Device: {info.manufacturer} {info.model} ({info.revision})")
+    return asdict(info)
+
+
+def print_network_info(modem: Modem, use_color: bool = True) -> Dict[str, Any]:
+    """Print network information."""
+    info = modem.get_network_info()
+    if not info:
+        print("Network: unavailable")
+        return {}
+
+    print(f"Network: {info.full_name} ({info.mcc_mnc})")
+    return asdict(info)
+
+
+def print_serving_cell(modem: Modem, use_color: bool = True) -> Dict[str, Any]:
+    """Print serving cell information."""
+    lte, nr5g = modem.get_serving_cell()
+    result: Dict[str, Any] = {"lte": None, "nr5g": None}
+
+    if lte:
+        rsrp_q = classify_rsrp(lte.rsrp)
+        rsrq_q = classify_rsrq(lte.rsrq)
+        sinr_q = classify_sinr(lte.sinr, is_5g=False)
+
+        dl_bw = format_lte_bandwidth(lte.dl_bandwidth_idx)
+        ul_bw = format_lte_bandwidth(lte.ul_bandwidth_idx)
+        freq = format_frequency(lte.earfcn, is_5g=False)
+
+        tx_power_str = f"{lte.tx_power:.1f} dBm" if lte.tx_power else "N/A"
+
+        print(f"\n{Colors.BLUE}[LTE - Band {lte.band}]{Colors.RESET} {lte.mode} | eNodeB: {lte.enodeb_id} | PCI: {lte.pci} | TAC: {lte.tac}")
+        print(f"  Bandwidth: DL {dl_bw} / UL {ul_bw} | Freq: {freq}")
+        print(f"  Signal: RSRP {lte.rsrp} ({quality_str(rsrp_q)}) | RSRQ {lte.rsrq} ({quality_str(rsrq_q)}) | SINR {lte.sinr} ({quality_str(sinr_q)})")
+        print(f"  TX Power: {tx_power_str}")
+
+        result["lte"] = asdict(lte)
+
+    if nr5g:
+        rsrp_q = classify_rsrp(nr5g.rsrp)
+        rsrq_q = classify_rsrq(nr5g.rsrq)
+        sinr_q = classify_sinr(nr5g.sinr, is_5g=True)
+
+        bw = format_nr5g_bandwidth(nr5g.bandwidth_idx)
+        freq = format_frequency(nr5g.arfcn, is_5g=True)
+
+        print(f"\n{Colors.GREEN}[5G - Band {nr5g.band}]{Colors.RESET} PCI: {nr5g.pci}")
+        print(f"  Bandwidth: {bw} | Freq: {freq}")
+        print(f"  Signal: RSRP {nr5g.rsrp} ({quality_str(rsrp_q)}) | RSRQ {nr5g.rsrq} ({quality_str(rsrq_q)}) | SINR {nr5g.sinr} ({quality_str(sinr_q)})")
+
+        result["nr5g"] = asdict(nr5g)
+
+    if not lte and not nr5g:
+        print("\nServing cell: no signal")
+
+    return result
+
+
+def print_carrier_aggregation(modem: Modem, use_color: bool = True) -> List[Dict[str, Any]]:
+    """Print carrier aggregation information."""
+    components = modem.get_carrier_aggregation()
+    if not components:
+        print("\nCarrier Aggregation: none")
+        return []
+
+    print(f"\n{Colors.BOLD}Carrier Aggregation:{Colors.RESET}")
+
+    result = []
+    for comp in components:
+        is_5g = comp.is_5g
+        if is_5g:
+            bw = format_nr5g_bandwidth(comp.bandwidth_raw)
+            freq = format_frequency(comp.earfcn, is_5g=True)
+        else:
+            bw = format_lte_bandwidth(comp.bandwidth_raw, from_qcainfo=True)
+            freq = format_frequency(comp.earfcn, is_5g=False)
+
+        rsrp_str = str(comp.rsrp) if comp.rsrp is not None else "-"
+        sinr_str = str(comp.sinr) if comp.sinr is not None else "-"
+        state_str = f"[{comp.state}]" if comp.state else ""
+
+        col = Colors.BLUE if comp.component_type == "PCC" else Colors.CYAN
+        print(f"  {col}{comp.component_type:3}{Colors.RESET} {comp.band_name:12} | PCI {comp.pci:3} | RSRP {rsrp_str:4} | SINR {sinr_str:4} | {bw:7} | {freq} {state_str}")
+
+        result.append(asdict(comp))
+
+    return result
+
+
+def print_neighbour_cells(modem: Modem, use_color: bool = True) -> List[Dict[str, Any]]:
+    """Print neighbour cell information."""
+    cells = modem.get_neighbour_cells()
+    if not cells:
+        print("\nNeighbour Cells: none detected")
+        return []
+
+    print(f"\n{Colors.BOLD}Neighbour Cells:{Colors.RESET}")
+
+    result = []
+    for cell in cells:
+        rsrp_q = classify_rsrp(cell.rsrp)
+        rsrp_col = Colors.for_quality(rsrp_q)
+        freq = format_frequency(cell.earfcn, is_5g=False)
+
+        print(f"  {cell.technology} {freq:20} | PCI {cell.pci:3} | RSRP {rsrp_col}{cell.rsrp:4}{Colors.RESET} | RSRQ {cell.rsrq:3} | ({cell.cell_type})")
+
+        result.append(asdict(cell))
+
+    return result
+
+
+def print_band_config(modem: Modem, use_color: bool = True) -> Dict[str, str]:
+    """Print band configuration."""
+    config = modem.get_band_config()
+    if not config:
+        print("\nBand Config: unavailable")
+        return {}
+
+    print(f"\n{Colors.BOLD}Band Configuration:{Colors.RESET}")
+    for key, value in config.items():
+        print(f"  {key}: {value}")
+
+    return config
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Display Quectel 5G modem information",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable colored output",
+    )
+    parser.add_argument(
+        "--section",
+        choices=["device", "network", "serving", "ca", "neighbours", "bands", "all"],
+        default="all",
+        help="Section to display (default: all)",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        help="Path to config file",
+    )
+
+    args = parser.parse_args()
+
+    # Disable colors if requested or not a TTY
+    use_color = not args.no_color and sys.stdout.isatty()
+    if not use_color:
+        for attr in dir(Colors):
+            if not attr.startswith("_") and attr.isupper():
+                setattr(Colors, attr, "")
+
+    config = load_config(args.config)
+
+    try:
+        modem = Modem.from_config(config)
+    except ModemError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print(f"Check that the modem is connected and {config.device} is correct.", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    sections = args.section
+    if sections == "all":
+        sections = ["device", "network", "serving", "ca", "neighbours"]
+    else:
+        sections = [sections]
+
+    result: Dict[str, Any] = {}
+
+    for section in sections:
+        if section == "device":
+            result["device"] = print_device_info(modem, use_color) if not args.json else asdict(modem.get_device_info()) if modem.get_device_info() else None
+        elif section == "network":
+            result["network"] = print_network_info(modem, use_color) if not args.json else asdict(modem.get_network_info()) if modem.get_network_info() else None
+        elif section == "serving":
+            if args.json:
+                lte, nr5g = modem.get_serving_cell()
+                result["serving"] = {
+                    "lte": asdict(lte) if lte else None,
+                    "nr5g": asdict(nr5g) if nr5g else None,
+                }
+            else:
+                result["serving"] = print_serving_cell(modem, use_color)
+        elif section == "ca":
+            if args.json:
+                result["carrier_aggregation"] = [asdict(c) for c in modem.get_carrier_aggregation()]
+            else:
+                result["carrier_aggregation"] = print_carrier_aggregation(modem, use_color)
+        elif section == "neighbours":
+            if args.json:
+                result["neighbours"] = [asdict(c) for c in modem.get_neighbour_cells()]
+            else:
+                result["neighbours"] = print_neighbour_cells(modem, use_color)
+        elif section == "bands":
+            if args.json:
+                result["band_config"] = modem.get_band_config()
+            else:
+                result["band_config"] = print_band_config(modem, use_color)
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()
