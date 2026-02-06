@@ -200,22 +200,25 @@ function M.print_carrier_aggregation(status, compact)
         local is_nr = carrier.rat == "nr"
         local band_name = format_band(carrier.band, is_nr)
         local rsrp_q = thresholds.rsrp_quality(carrier.rsrp)
+        local sinr_q = thresholds.sinr_quality(carrier.sinr)
 
         local col = carrier.role == "pcc" and M.Colors.BLUE or M.Colors.CYAN
 
         if compact then
-            print(string.format("  %s%-3s%s %-8s | PCI %3s | RSRP %s | SINR %4s",
+            print(string.format("  %s%-3s%s %-8s | PCI %3s | RSRP %s | SINR %s",
                 M.color(col), carrier.role:upper(), M.color(M.Colors.RESET),
                 band_name, carrier.pci or "-",
                 M.format_signal(carrier.rsrp, rsrp_q),
-                carrier.sinr or "-"))
+                M.format_signal(carrier.sinr, sinr_q)))
         else
             local bw = frequency.format_bandwidth(carrier.bandwidth_mhz)
             local freq_str = frequency.format_frequency(carrier.earfcn or 0, is_nr)
-            print(string.format("  %s%s%s %-12s | PCI %3s | RSRP %4s | SINR %4s | %7s | %s",
+            print(string.format("  %s%s%s %-12s | PCI %3s | RSRP %s | SINR %s | %7s | %s",
                 M.color(col), carrier.role:upper(), M.color(M.Colors.RESET),
                 band_name, carrier.pci or "-",
-                carrier.rsrp or "-", carrier.sinr or "-", bw, freq_str))
+                M.format_signal(carrier.rsrp, rsrp_q),
+                M.format_signal(carrier.sinr, sinr_q),
+                bw, freq_str))
         end
     end
 
