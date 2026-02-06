@@ -1,0 +1,145 @@
+#!/usr/bin/env lua
+-- modem-debug: Debug serial communication with Quectel modem
+
+package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
+
+local posix = require("posix")
+local unistd = require("posix.unistd")
+
+local device = arg[1] or "/dev/ttyUSB2"
+local command = arg[2] or "ATI"
+
+print("=== Modem Debug v2 ===")
+print("Device: " .. device)
+print("Command: " .. command)
+print("")
+
+-- Try to open
+print("--- Opening device ---")
+local fd, err = posix.open(device, posix.O_RDWR + posix.O_NOCTTY + posix.O_NONBLOCK)
+if not fd then
+    print("ERROR: Failed to open: " .. tostring(err))
+    os.exit(1)
+end
+print("Opened successfully, fd = " .. tostring(fd))
+
+-- Try to configure termios for raw mode
+print("\n--- Configuring terminal ---")
+if posix.tcgetattr and posix.tcsetattr then
+    local termios, err = posix.tcgetattr(fd)
+    if termios then
+        print("Current termios:")
+        print("  ispeed=" .. termios.ispeed .. " ospeed=" .. termios.ospeed)
+        print("  cflag=" .. termios.cflag .. " lflag=" .. termios.lflag)
+        print("  iflag=" .. termios.iflag .. " oflag=" .. termios.oflag)
+
+        -- Set raw mode
+        termios.iflag = 0
+        termios.oflag = 0
+        termios.lflag = 0
+        -- cflag: 8N1, enable receiver, local mode
+        -- CS8 = 0x30, CREAD = 0x80, CLOCAL = 0x800
+        termios.cflag = 0x8B0  -- CS8 | CREAD | CLOCAL
+
+        -- Set control characters
+        if termios.cc then
+            termios.cc[posix.VMIN] = 0   -- Non-blocking
+            termios.cc[posix.VTIME] = 1  -- 0.1s timeout
+        end
+
+        local ok, err = posix.tcsetattr(fd, posix.TCSANOW, termios)
+        if ok then
+            print("Termios configured for raw mode")
+        else
+            print("tcsetattr failed: " .. tostring(err))
+        end
+    else
+        print("tcgetattr failed: " .. tostring(err))
+    end
+end
+
+-- Drain any pending input
+print("\n--- Draining pending input ---")
+for i = 1, 10 do
+    local data = posix.read(fd, 1024)
+    if data and #data > 0 then
+        print("  Drained " .. #data .. " bytes")
+    else
+        break
+    end
+end
+print("  Done draining")
+
+-- Test 1: Try with \r\n
+print("\n--- Test 1: Command with \\r\\n ---")
+local function try_command(cmd_bytes, label)
+    print("Sending: " .. label .. " (" .. #cmd_bytes .. " bytes)")
+
+    local written = posix.write(fd, cmd_bytes)
+    print("  Written: " .. tostring(written) .. " bytes")
+
+    -- Force sync
+    if unistd.fsync then
+        unistd.fsync(fd)
+    end
+
+    -- Small delay
+    os.execute("sleep 0.2")
+
+    -- Try reading multiple times
+    local response = {}
+    for i = 1, 10 do
+        local data = posix.read(fd, 1024)
+        if data and #data > 0 then
+            print("  Read[" .. i .. "]: " .. #data .. " bytes")
+            table.insert(response, data)
+        end
+        os.execute("sleep 0.1")
+    end
+
+    local full = table.concat(response)
+    if #full > 0 then
+        print("  Response: " .. full:gsub("\r", "\\r"):gsub("\n", "\\n"))
+        return true
+    else
+        print("  No response")
+        return false
+    end
+end
+
+if try_command(command .. "\r\n", command .. "\\r\\n") then
+    posix.close(fd)
+    os.exit(0)
+end
+
+-- Test 2: Try with just \r
+print("\n--- Test 2: Command with \\r only ---")
+if try_command(command .. "\r", command .. "\\r") then
+    posix.close(fd)
+    os.exit(0)
+end
+
+-- Test 3: Try with just \n
+print("\n--- Test 3: Command with \\n only ---")
+if try_command(command .. "\n", command .. "\\n") then
+    posix.close(fd)
+    os.exit(0)
+end
+
+-- Test 4: Check if it's the right port by trying other ttyUSB ports
+print("\n--- No response from modem ---")
+print("Possible issues:")
+print("1. Wrong serial port - try /dev/ttyUSB0, /dev/ttyUSB1, /dev/ttyUSB3")
+print("2. Modem not responding - check if it's powered on")
+print("3. Port in use by another process - check with 'lsof " .. device .. "'")
+
+-- List available ttyUSB devices
+print("\n--- Available ttyUSB devices ---")
+os.execute("ls -la /dev/ttyUSB* 2>/dev/null || echo 'No ttyUSB devices found'")
+
+-- Check if port is in use
+print("\n--- Checking if port is in use ---")
+os.execute("lsof " .. device .. " 2>/dev/null || echo 'Port not in use by other process'")
+
+posix.close(fd)
+print("\n--- Done ---")
