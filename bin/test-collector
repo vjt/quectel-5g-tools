@@ -1,0 +1,99 @@
+#!/usr/bin/env lua
+-- Test script for the Prometheus collector
+-- Run this directly to see what metrics would be emitted
+
+package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
+
+-- Mock metric function that prints what it receives
+local function mock_metric(name, type, labels, value)
+    local label_parts = {}
+    if labels then
+        for k, v in pairs(labels) do
+            table.insert(label_parts, string.format('%s="%s"', k, tostring(v)))
+        end
+        table.sort(label_parts)
+    end
+    local label_str = "{" .. table.concat(label_parts, ",") .. "}"
+    print(string.format("METRIC: %s%s = %s (type=%s)", name, label_str, tostring(value), type))
+end
+
+print("=== Testing Prometheus Collector ===")
+print("")
+
+-- First test: can we load the quectel module?
+print("1. Loading quectel module...")
+local ok, quectel = pcall(require, "quectel")
+if not ok then
+    print("   FAILED: " .. tostring(quectel))
+    os.exit(1)
+end
+print("   OK")
+
+-- Second test: can we create a modem and get status?
+print("")
+print("2. Getting modem status...")
+local modem = quectel.create_modem()
+local ok, status = pcall(function() return modem:get_signal_status() end)
+if not ok then
+    print("   FAILED: " .. tostring(status))
+    modem:close()
+    os.exit(1)
+end
+if not status then
+    print("   FAILED: status is nil")
+    modem:close()
+    os.exit(1)
+end
+print("   OK")
+
+-- Print status details
+print("")
+print("3. Status contents:")
+print("   device: " .. tostring(status.device and status.device.model))
+print("   operator: " .. tostring(status.operator and status.operator.operator))
+print("   serving.lte: " .. tostring(status.serving and status.serving.lte and "yes" or "no"))
+print("   serving.nr5g: " .. tostring(status.serving and status.serving.nr5g and "yes" or "no"))
+print("   ca.scc count: " .. tostring(status.ca and status.ca.scc and #status.ca.scc or 0))
+print("   neighbours count: " .. tostring(status.neighbours and #status.neighbours or 0))
+
+modem:close()
+
+-- Third test: load and run the collector
+print("")
+print("4. Loading collector module...")
+local ok, collector = pcall(require, "prometheus-collectors.quectel")
+if not ok then
+    print("   FAILED: " .. tostring(collector))
+    os.exit(1)
+end
+print("   OK")
+
+-- Check if scrape exists
+print("")
+print("5. Checking scrape function...")
+if not collector.scrape then
+    print("   FAILED: collector.scrape is nil")
+    print("   Available keys:")
+    for k, v in pairs(collector) do
+        print("     " .. k .. " = " .. type(v))
+    end
+    os.exit(1)
+end
+print("   OK (type=" .. type(collector.scrape) .. ")")
+
+-- Run scrape with mock metric
+print("")
+print("6. Running scrape with mock metric function...")
+print("---")
+local ok, err = pcall(function()
+    collector.scrape(mock_metric)
+end)
+print("---")
+if not ok then
+    print("   FAILED: " .. tostring(err))
+    os.exit(1)
+end
+print("   OK")
+
+print("")
+print("=== Done ===")

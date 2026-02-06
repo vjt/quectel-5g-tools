@@ -261,4 +261,70 @@ function M:get_status()
     return status
 end
 
+--- Get lightweight signal status (only serving cell + CA)
+-- Use this for frequent polling (e.g., Prometheus) to reduce modem load
+-- Only 2 AT commands instead of 6
+-- @return Table with serving, ca (no device, operator, imei, neighbours)
+function M:get_signal_status()
+    local status = {}
+
+    status.serving = self:get_serving_cell()
+    status.ca = self:get_ca_info()
+
+    -- Enrich with frequency info
+    if status.serving and status.serving.lte then
+        local lte = status.serving.lte
+        if lte.earfcn then
+            lte.frequency_mhz = frequency.earfcn_to_mhz(lte.earfcn)
+        end
+        if lte.bandwidth_dl then
+            lte.bandwidth_dl_mhz = frequency.lte_bandwidth_mhz(lte.bandwidth_dl)
+        end
+        if lte.bandwidth_ul then
+            lte.bandwidth_ul_mhz = frequency.lte_bandwidth_mhz(lte.bandwidth_ul)
+        end
+    end
+
+    if status.serving and status.serving.nr5g then
+        local nr = status.serving.nr5g
+        if nr.arfcn then
+            nr.frequency_mhz = frequency.nrarfcn_to_mhz(nr.arfcn)
+        end
+        if nr.bandwidth then
+            nr.bandwidth_mhz = frequency.nr5g_bandwidth_mhz(nr.bandwidth)
+        end
+    end
+
+    -- Enrich CA info
+    if status.ca then
+        if status.ca.pcc then
+            local pcc = status.ca.pcc
+            if pcc.earfcn then
+                if pcc.rat == "nr" then
+                    pcc.frequency_mhz = frequency.nrarfcn_to_mhz(pcc.earfcn)
+                else
+                    pcc.frequency_mhz = frequency.earfcn_to_mhz(pcc.earfcn)
+                end
+            end
+            if pcc.bandwidth_rb then
+                pcc.bandwidth_mhz = frequency.lte_bandwidth_mhz(pcc.bandwidth_rb, true)
+            end
+        end
+        for _, scc in ipairs(status.ca.scc or {}) do
+            if scc.earfcn then
+                if scc.rat == "nr" then
+                    scc.frequency_mhz = frequency.nrarfcn_to_mhz(scc.earfcn)
+                else
+                    scc.frequency_mhz = frequency.earfcn_to_mhz(scc.earfcn)
+                end
+            end
+            if scc.bandwidth_rb then
+                scc.bandwidth_mhz = frequency.lte_bandwidth_mhz(scc.bandwidth_rb, true)
+            end
+        end
+    end
+
+    return status
+end
+
 return M

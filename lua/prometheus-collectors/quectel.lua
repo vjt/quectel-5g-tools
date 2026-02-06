@@ -1,25 +1,22 @@
 -- Prometheus collector for Quectel 5G modems
 -- Install to /usr/lib/lua/prometheus-collectors/quectel.lua
+--
+-- Uses get_signal_status() which only makes 2 AT commands:
+-- - AT+QENG="servingcell"
+-- - AT+QCAINFO
+-- This is much lighter than get_status() which makes 6 commands.
 
 local quectel = require("quectel")
 
 local function scrape(metric)
     local modem = quectel.create_modem()
 
-    local ok, status = pcall(function() return modem:get_status() end)
+    -- Use lightweight status - only serving cell and CA info (2 AT commands)
+    local ok, status = pcall(function() return modem:get_signal_status() end)
     if not ok or not status then
         modem:close()
         return
     end
-
-    -- modem_info - static info, always 1
-    metric("modem_info", "gauge", {
-        model = status.device and status.device.model or "unknown",
-        revision = status.device and status.device.revision or "",
-        imei = status.imei or "",
-        operator = status.operator and status.operator.operator or "",
-        mcc_mnc = status.operator and status.operator.mcc_mnc or "",
-    }, 1)
 
     -- Collect serving cells and CA info
     local cells = {}
@@ -135,26 +132,6 @@ local function scrape(metric)
             for k, v in pairs(base_labels) do labels[k] = v end
             labels.direction = "ul"
             metric("modem_bandwidth_mhz", "gauge", labels, cell.bandwidth_ul_mhz)
-        end
-    end
-
-    -- Emit neighbour metrics
-    if status.neighbours then
-        for _, nb in ipairs(status.neighbours) do
-            local band = nil
-            if nb.earfcn then
-                local _, b = quectel.frequency.earfcn_to_mhz(nb.earfcn)
-                band = b
-            end
-
-            if nb.rsrp then
-                metric("modem_neighbour_rsrp_dbm", "gauge", {
-                    rat = nb.rat or "lte",
-                    band = quectel.format_band(band, false),
-                    pci = tostring(nb.pci or 0),
-                    earfcn = tostring(nb.earfcn or 0),
-                }, nb.rsrp)
-            end
         end
     end
 
