@@ -27,15 +27,24 @@ end
 --- Open the serial port
 -- @return true on success, nil + error on failure
 function M:open()
-    local fd, err = posix.open(self.device, posix.O_RDWR + posix.O_NOCTTY)
+    local fd, err = posix.open(self.device, posix.O_RDWR + posix.O_NOCTTY + posix.O_NONBLOCK)
     if not fd then
         return nil, "Failed to open " .. self.device .. ": " .. (err or "unknown error")
     end
     self.fd = fd
 
-    -- Configure serial port: 115200 8N1
-    -- Note: Full termios configuration would require more setup
-    -- For now we rely on the port being pre-configured by the kernel
+    -- Configure serial port for raw mode
+    if posix.tcgetattr and posix.tcsetattr then
+        local termios = posix.tcgetattr(fd)
+        if termios then
+            termios.iflag = 0
+            termios.oflag = 0
+            termios.lflag = 0
+            -- CS8 | CREAD | CLOCAL (8N1, enable receiver, ignore modem control)
+            termios.cflag = 0x8B0
+            posix.tcsetattr(fd, posix.TCSANOW, termios)
+        end
+    end
 
     return true
 end
@@ -64,29 +73,37 @@ function M:send(command)
         return nil, "Failed to write command"
     end
 
-    -- Read response with timeout
+    -- Small delay to let modem process command
+    os.execute("sleep 0.1")
+
+    -- Read response with timeout using non-blocking reads
     local response = {}
     local start_time = os.time()
-    local poll_fds = {{fd = self.fd, events = {IN = true}}}
+    local last_read_time = os.time()
 
     while true do
-        -- Check timeout
+        -- Check overall timeout
         if os.time() - start_time > self.timeout then
             break
         end
 
-        -- Use poll for timeout (returns count of ready FDs)
-        local nready = posix.poll(poll_fds, 100)
-        if nready and nready > 0 then
-            local data = posix.read(self.fd, 1024)
-            if data and #data > 0 then
-                table.insert(response, data)
-                -- Check for end of response
-                local full = table.concat(response)
-                if full:match("\r\nOK\r\n$") or full:match("\r\nERROR\r\n$") then
-                    break
-                end
+        local data = posix.read(self.fd, 1024)
+        if data and #data > 0 then
+            table.insert(response, data)
+            last_read_time = os.time()
+
+            -- Check for end of response
+            local full = table.concat(response)
+            if full:match("\r\nOK\r\n$") or full:match("\r\nERROR\r\n$") then
+                break
             end
+        else
+            -- No data available, small delay before retry
+            -- But if we've been waiting too long since last data, give up
+            if os.time() - last_read_time > 1 then
+                break
+            end
+            os.execute("sleep 0.05")
         end
     end
 
