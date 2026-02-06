@@ -22,33 +22,49 @@ local function sleep(seconds)
     posix_time.nanosleep({tv_sec = sec, tv_nsec = nsec})
 end
 
---- Acquire exclusive lock on modem
--- @return lock file descriptor on success, nil + error on failure
+--- Acquire exclusive lock on modem using lockfile
+-- @return true on success, nil + error on failure
 local function acquire_lock()
     -- Create lock directory if it doesn't exist
-    os.execute("mkdir -p /var/lock 2>/dev/null")
+    posix.mkdir("/var/lock")  -- ignore error if exists
 
-    local fd, err = posix.open(LOCK_FILE, posix.O_CREAT + posix.O_RDWR, 420) -- 0644
+    -- Use O_EXCL for atomic lock file creation
+    local fd = posix.open(LOCK_FILE, posix.O_CREAT + posix.O_EXCL + posix.O_WRONLY, 420)
     if not fd then
-        return nil, "Failed to open lock file: " .. (err or "unknown")
+        -- Lock file exists - check if owner process still alive
+        local rf = posix.open(LOCK_FILE, posix.O_RDONLY)
+        if rf then
+            local pid_str = posix.read(rf, 32)
+            posix.close(rf)
+            local pid = tonumber(pid_str)
+            if pid then
+                -- Check if process exists (kill with signal 0)
+                local exists = posix.kill(pid, 0)
+                if not exists then
+                    -- Process is dead, remove stale lock
+                    os.remove(LOCK_FILE)
+                    fd = posix.open(LOCK_FILE, posix.O_CREAT + posix.O_EXCL + posix.O_WRONLY, 420)
+                end
+            else
+                -- Invalid PID in lock file, remove it
+                os.remove(LOCK_FILE)
+                fd = posix.open(LOCK_FILE, posix.O_CREAT + posix.O_EXCL + posix.O_WRONLY, 420)
+            end
+        end
+        if not fd then
+            return nil, "Modem is locked by another process"
+        end
     end
 
-    -- Try to get exclusive lock (non-blocking)
-    local ok = posix.flock(fd, posix.LOCK_EX + posix.LOCK_NB)
-    if not ok then
-        posix.close(fd)
-        return nil, "Modem is locked by another process"
-    end
-
-    return fd
+    -- Write our PID to the lock file
+    posix.write(fd, tostring(posix.getpid()))
+    posix.close(fd)
+    return true
 end
 
 --- Release lock
-local function release_lock(lock_fd)
-    if lock_fd then
-        posix.flock(lock_fd, posix.LOCK_UN)
-        posix.close(lock_fd)
-    end
+local function release_lock()
+    os.remove(LOCK_FILE)
 end
 
 --- Create a new modem instance
@@ -60,7 +76,7 @@ function M.new(device, timeout)
     self.device = device or DEFAULT_DEVICE
     self.timeout = timeout or DEFAULT_TIMEOUT
     self.fd = nil
-    self.lock_fd = nil
+    self.has_lock = false
     return self
 end
 
@@ -68,16 +84,16 @@ end
 -- @return true on success, nil + error on failure
 function M:open()
     -- Acquire lock first
-    local lock_fd, lock_err = acquire_lock()
-    if not lock_fd then
+    local ok, lock_err = acquire_lock()
+    if not ok then
         return nil, lock_err
     end
-    self.lock_fd = lock_fd
+    self.has_lock = true
 
     local fd, err = posix.open(self.device, posix.O_RDWR + posix.O_NOCTTY + posix.O_NONBLOCK)
     if not fd then
-        release_lock(self.lock_fd)
-        self.lock_fd = nil
+        release_lock()
+        self.has_lock = false
         return nil, "Failed to open " .. self.device .. ": " .. (err or "unknown error")
     end
     self.fd = fd
@@ -104,9 +120,9 @@ function M:close()
         posix.close(self.fd)
         self.fd = nil
     end
-    if self.lock_fd then
-        release_lock(self.lock_fd)
-        self.lock_fd = nil
+    if self.has_lock then
+        release_lock()
+        self.has_lock = false
     end
 end
 
