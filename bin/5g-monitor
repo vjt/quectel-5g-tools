@@ -54,6 +54,14 @@ local function cleanup()
     end
 end
 
+-- Map RRC state to user-friendly display
+local state_labels = {
+    NOCONN = "IDLE",
+    CONNECT = "ACTIVE",
+    SEARCH = "SEARCHING",
+    LIMSRV = "LIMITED",
+}
+
 local function draw_header(status)
     local device_str = "?"
     if status.device then
@@ -65,9 +73,10 @@ local function draw_header(status)
         network_str = string.format("%s (%s)", status.operator.operator or "?", status.operator.mcc_mnc or "?")
     end
 
-    local state = "CONNECTED"
+    local state = "?"
     if status.serving and status.serving.state then
-        state = status.serving.state
+        local raw_state = status.serving.state
+        state = state_labels[raw_state] or raw_state
     end
     local beep_str = beeps_enabled and "BEEP:ON" or "BEEP:OFF"
 
