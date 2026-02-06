@@ -1,0 +1,128 @@
+#!/usr/bin/env lua
+-- Test script for the QCAINFO parser
+-- Verifies correct parsing of all QCAINFO formats
+
+package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;lua/?.lua;lua/?/init.lua;" .. package.path
+
+local parser = require("quectel.parser")
+
+local passed = 0
+local failed = 0
+
+local function test(name, condition)
+    if condition then
+        print(string.format("  [OK] %s", name))
+        passed = passed + 1
+    else
+        print(string.format("  [FAIL] %s", name))
+        failed = failed + 1
+    end
+end
+
+print("=== Testing QCAINFO Parser ===")
+print("")
+
+-- Test 1: PCC with 10 fields
+print("Test 1: PCC (10 fields)")
+local pcc_sample = '+QCAINFO: "PCC",1350,100,"LTE BAND 3",1,427,-94,-15,-58,-1\n\nOK'
+local result = parser.parse_qcainfo(pcc_sample)
+test("PCC parsed", result.pcc ~= nil)
+test("PCC pci=427", result.pcc and result.pcc.pci == 427)
+test("PCC band=3", result.pcc and result.pcc.band == 3)
+test("PCC rsrp=-94", result.pcc and result.pcc.rsrp == -94)
+test("PCC sinr=-1", result.pcc and result.pcc.sinr == -1)
+test("PCC state=1", result.pcc and result.pcc.state == 1)
+print("")
+
+-- Test 2: SCC with 5 fields (NR5G)
+print("Test 2: SCC NR5G (5 fields)")
+local nr5g_sample = '+QCAINFO: "SCC",648768,10,"NR5G BAND 78",697\n\nOK'
+result = parser.parse_qcainfo(nr5g_sample)
+test("SCC parsed", #result.scc == 1)
+test("SCC pci=697", result.scc[1] and result.scc[1].pci == 697)
+test("SCC band=78", result.scc[1] and result.scc[1].band == 78)
+test("SCC rat=nr", result.scc[1] and result.scc[1].rat == "nr")
+test("SCC arfcn=648768", result.scc[1] and result.scc[1].earfcn == 648768)
+print("")
+
+-- Test 3: SCC with 13 fields (full LTE)
+print("Test 3: SCC LTE full (13 fields)")
+local scc13_sample = '+QCAINFO: "SCC",275,75,"LTE BAND 1",1,406,-102,-20,-74,-10,0,-,-\n\nOK'
+result = parser.parse_qcainfo(scc13_sample)
+test("SCC parsed", #result.scc == 1)
+test("SCC pci=406", result.scc[1] and result.scc[1].pci == 406)
+test("SCC band=1", result.scc[1] and result.scc[1].band == 1)
+test("SCC rsrp=-102", result.scc[1] and result.scc[1].rsrp == -102)
+test("SCC rsrq=-20", result.scc[1] and result.scc[1].rsrq == -20)
+test("SCC sinr=-10", result.scc[1] and result.scc[1].sinr == -10)
+test("SCC state=1", result.scc[1] and result.scc[1].state == 1)
+print("")
+
+-- Test 4: SCC with 9 fields (no signal)
+print("Test 4: SCC LTE no signal (9 fields)")
+local scc9_sample = '+QCAINFO: "SCC",1500,50,"LTE BAND 7",2,123,1,B20,6200\n\nOK'
+result = parser.parse_qcainfo(scc9_sample)
+test("SCC parsed", #result.scc == 1)
+test("SCC pci=123", result.scc[1] and result.scc[1].pci == 123)
+test("SCC state=2", result.scc[1] and result.scc[1].state == 2)
+test("SCC ul_configured=1", result.scc[1] and result.scc[1].ul_configured == 1)
+test("SCC ul_band=B20", result.scc[1] and result.scc[1].ul_band == "B20")
+test("SCC ul_earfcn=6200", result.scc[1] and result.scc[1].ul_earfcn == 6200)
+test("SCC rsrp=nil", result.scc[1] and result.scc[1].rsrp == nil)
+print("")
+
+-- Test 5: SCC with 12 fields
+print("Test 5: SCC LTE with signal (12 fields)")
+local scc12_sample = '+QCAINFO: "SCC",1500,50,"LTE BAND 7",2,123,1,B20,6200,-95,-12,-5\n\nOK'
+result = parser.parse_qcainfo(scc12_sample)
+test("SCC parsed", #result.scc == 1)
+test("SCC pci=123", result.scc[1] and result.scc[1].pci == 123)
+test("SCC state=2", result.scc[1] and result.scc[1].state == 2)
+test("SCC rsrp=-95", result.scc[1] and result.scc[1].rsrp == -95)
+test("SCC rsrq=-12", result.scc[1] and result.scc[1].rsrq == -12)
+test("SCC sinr=-5", result.scc[1] and result.scc[1].sinr == -5)
+print("")
+
+-- Test 6: Mixed response (like real modem output)
+print("Test 6: Mixed response from CLAUDE.md")
+local mixed_sample = [[
++QCAINFO: "PCC",275,75,"LTE BAND 1",1,280,-99,-14,-67,-4
++QCAINFO: "SCC",1350,100,"LTE BAND 3",1,240,-95,-18,-68,-10,0,-,-
++QCAINFO: "SCC",648768,10,"NR5G BAND 78",920
+
+OK
+]]
+result = parser.parse_qcainfo(mixed_sample)
+test("PCC parsed", result.pcc ~= nil)
+test("PCC pci=280", result.pcc and result.pcc.pci == 280)
+test("PCC band=1", result.pcc and result.pcc.band == 1)
+test("2 SCCs parsed", #result.scc == 2)
+test("SCC1 pci=240", result.scc[1] and result.scc[1].pci == 240)
+test("SCC1 band=3", result.scc[1] and result.scc[1].band == 3)
+test("SCC2 pci=920", result.scc[2] and result.scc[2].pci == 920)
+test("SCC2 band=78", result.scc[2] and result.scc[2].band == 78)
+test("SCC2 rat=nr", result.scc[2] and result.scc[2].rat == "nr")
+print("")
+
+-- Test 7: User's actual output
+print("Test 7: User's actual modem output")
+local user_sample = [[
++QCAINFO: "PCC",1350,100,"LTE BAND 3",1,427,-94,-15,-58,-1
++QCAINFO: "SCC",275,75,"LTE BAND 1",1,406,-102,-20,-74,-10,0,-,-
++QCAINFO: "SCC",648768,10,"NR5G BAND 78",697
+
+OK
+]]
+result = parser.parse_qcainfo(user_sample)
+test("PCC parsed", result.pcc ~= nil)
+test("PCC pci=427 (not 1)", result.pcc and result.pcc.pci == 427)
+test("SCC1 pci=406 (not 1)", result.scc[1] and result.scc[1].pci == 406)
+test("SCC2 pci=697", result.scc[2] and result.scc[2].pci == 697)
+print("")
+
+print("=== Results ===")
+print(string.format("Passed: %d, Failed: %d", passed, failed))
+
+if failed > 0 then
+    os.exit(1)
+end
