@@ -41,16 +41,16 @@ function M.load_config()
         if beeps then config.beeps_enabled = (beeps == "1") end
         if refresh then config.refresh_interval = tonumber(refresh) end
 
-        -- Parse band lists (colon-separated like "1:3:7:20")
-        if lte then
+        -- Band lists come as tables from UCI (list entries)
+        if lte and type(lte) == "table" then
             config.lte_bands = {}
-            for band in lte:gmatch("(%d+)") do
+            for _, band in ipairs(lte) do
                 table.insert(config.lte_bands, tonumber(band))
             end
         end
-        if nr5g then
+        if nr5g and type(nr5g) == "table" then
             config.nr5g_bands = {}
-            for band in nr5g:gmatch("(%d+)") do
+            for _, band in ipairs(nr5g) do
                 table.insert(config.nr5g_bands, tonumber(band))
             end
         end
