@@ -5,51 +5,42 @@
 package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 
 local quectel = require("quectel")
-local frequency = quectel.frequency
+local display = quectel.display
 local thresholds = quectel.thresholds
-
--- ANSI escape codes
-local ESC = "\027"
-local CLEAR = ESC .. "[2J"
-local HOME = ESC .. "[H"
-local BOLD = ESC .. "[1m"
-local RESET = ESC .. "[0m"
-local RED = ESC .. "[91m"
-local GREEN = ESC .. "[92m"
-local YELLOW = ESC .. "[93m"
-local BLUE = ESC .. "[94m"
-local CYAN = ESC .. "[96m"
-local WHITE = ESC .. "[97m"
 
 -- Configuration
 local config = quectel.load_config()
 local refresh_interval = config.refresh_interval or 5
 local beeps_enabled = config.beeps_enabled
 if beeps_enabled == nil then beeps_enabled = true end
+
+-- State
 local running = true
+local modem = nil
 
-local function quality_color(quality)
-    if quality == thresholds.EXCELLENT then return CYAN end
-    if quality == thresholds.GOOD then return GREEN end
-    if quality == thresholds.FAIR then return YELLOW end
-    if quality == thresholds.POOR then return RED end
-    return WHITE
+-- Signal handling for Ctrl+C
+local function setup_signal_handler()
+    local ok, signal = pcall(require, "posix.signal")
+    if ok and signal.signal then
+        signal.signal(signal.SIGINT, function()
+            running = false
+        end)
+        signal.signal(signal.SIGTERM, function()
+            running = false
+        end)
+        return true
+    end
+    return false
 end
 
-local function beep()
-    if beeps_enabled then
-        io.write("\a")
-        io.flush()
+local function cleanup()
+    -- Show cursor and reset terminal
+    io.write(display.SHOW_CURSOR)
+    io.write(display.Colors.RESET)
+    io.flush()
+    if modem then
+        modem:close()
     end
-end
-
-local function format_signal(value, quality)
-    if not value then return "-" end
-    local q = quality or ""
-    if q ~= "" then
-        return string.format("%s%d%s", quality_color(quality), value, RESET)
-    end
-    return tostring(value)
 end
 
 local function draw_header(status)
@@ -70,126 +61,26 @@ local function draw_header(status)
     local beep_str = beeps_enabled and "BEEP:ON" or "BEEP:OFF"
 
     print(string.format("%s5G Monitor%s | %s | %s | %s | %s",
-        BOLD, RESET, device_str, network_str, state, beep_str))
+        display.color(display.Colors.BOLD), display.color(display.Colors.RESET),
+        device_str, network_str, state, beep_str))
     print(string.rep("-", 78))
 end
 
-local function draw_serving_cell(status)
-    if not status.serving then
-        print("No serving cell")
-        return
-    end
-
-    local lte = status.serving.lte
-    local nr = status.serving.nr5g
-
-    if lte then
-        local rsrp_q = thresholds.rsrp_quality(lte.rsrp)
-        local rsrq_q = thresholds.rsrq_quality(lte.rsrq)
-        local sinr_q = thresholds.sinr_quality(lte.sinr)
-        local enodeb = quectel.extract_enodeb(lte.cell_id) or "?"
-
-        print(string.format("%s[LTE - Band %s]%s %s | eNodeB: %s | PCI: %s",
-            BLUE, lte.band or "?", RESET, lte.duplex or "?", enodeb, lte.pci or "?"))
-
-        print(string.format("  RSRP: %s dBm | RSRQ: %s dB | SINR: %s dB",
-            format_signal(lte.rsrp, rsrp_q),
-            format_signal(lte.rsrq, rsrq_q),
-            format_signal(lte.sinr, sinr_q)))
-
-        local freq_str = frequency.format_frequency(lte.earfcn or 0, false)
-        local dl_bw = frequency.format_bandwidth(lte.bandwidth_dl_mhz)
-        local ul_bw = frequency.format_bandwidth(lte.bandwidth_ul_mhz)
-        print(string.format("  Freq: %s | BW: DL %s / UL %s", freq_str, dl_bw, ul_bw))
-    end
-
-    if nr then
-        local rsrp_q = thresholds.rsrp_quality(nr.rsrp)
-        local rsrq_q = thresholds.rsrq_quality(nr.rsrq)
-        local sinr_q = thresholds.sinr_quality(nr.sinr)
-
-        print("")
-        print(string.format("%s[5G-NSA - Band n%s]%s PCI: %s",
-            GREEN, nr.band or "?", RESET, nr.pci or "?"))
-
-        print(string.format("  RSRP: %s dBm | RSRQ: %s dB | SINR: %s dB",
-            format_signal(nr.rsrp, rsrp_q),
-            format_signal(nr.rsrq, rsrq_q),
-            format_signal(nr.sinr, sinr_q)))
-
-        local freq_str = frequency.format_frequency(nr.arfcn or 0, true)
-        local bw = frequency.format_bandwidth(nr.bandwidth_mhz)
-        print(string.format("  Freq: %s | BW: %s", freq_str, bw))
-    end
-end
-
-local function draw_carrier_aggregation(status)
-    if not status.ca or (not status.ca.pcc and #status.ca.scc == 0) then
-        print("\nCarrier Aggregation: none")
-        return
-    end
-
-    print(string.format("\n%sCarrier Aggregation:%s", BOLD, RESET))
-
-    local function print_carrier(carrier)
-        local is_nr = carrier.rat == "nr"
-        local band_name = quectel.format_band(carrier.band, is_nr)
-        local rsrp_q = thresholds.rsrp_quality(carrier.rsrp)
-
-        local col = carrier.role == "pcc" and BLUE or CYAN
-        print(string.format("  %s%-3s%s %-8s | PCI %3s | RSRP %s | SINR %4s",
-            col, carrier.role:upper(), RESET,
-            band_name, carrier.pci or "-",
-            format_signal(carrier.rsrp, rsrp_q),
-            carrier.sinr or "-"))
-    end
-
-    if status.ca.pcc then
-        print_carrier(status.ca.pcc)
-    end
-
-    for _, scc in ipairs(status.ca.scc) do
-        print_carrier(scc)
-    end
-end
-
-local function draw_neighbours(status, max_rows)
-    max_rows = max_rows or 5
-
-    if not status.neighbours or #status.neighbours == 0 then
-        print("\nNeighbour Cells: none")
-        return
-    end
-
-    print(string.format("\n%sNeighbour Cells:%s", BOLD, RESET))
-
-    local count = 0
-    for _, nb in ipairs(status.neighbours) do
-        if count >= max_rows then
-            print(string.format("  ... and %d more", #status.neighbours - count))
-            break
-        end
-
-        local rsrp_q = thresholds.rsrp_quality(nb.rsrp)
-        local freq_str = frequency.format_frequency(nb.earfcn or 0, false)
-
-        print(string.format("  %-3s %-18s | PCI %3s | RSRP %s | (%s)",
-            nb.rat:upper(), freq_str, nb.pci or "-",
-            format_signal(nb.rsrp, rsrp_q),
-            nb.scope or "?"))
-
-        count = count + 1
-    end
-end
-
-local function draw_help()
+local function draw_footer()
     print("")
     print("Press Ctrl+C to quit")
 end
 
-local function main_loop(modem)
-    local last_beep_time = 0
+local function do_beeps(sinr)
+    if not beeps_enabled or not sinr then return end
 
+    local num_beeps = thresholds.beep_count(sinr)
+    if num_beeps and num_beeps > 0 then
+        display.beep(num_beeps, 0.7)
+    end
+end
+
+local function main_loop()
     while running do
         -- Get modem status
         local ok, status = pcall(function() return modem:get_status() end)
@@ -197,40 +88,25 @@ local function main_loop(modem)
             status = {}
         end
 
-        -- Clear screen and move cursor home
-        io.write(CLEAR .. HOME)
+        -- Clear screen and move cursor home, hide cursor
+        io.write(display.CLEAR .. display.HOME .. display.HIDE_CURSOR)
 
         draw_header(status)
-        draw_serving_cell(status)
-        draw_carrier_aggregation(status)
-        draw_neighbours(status, 5)
-        draw_help()
+        display.print_serving_cell(status, true)
+        display.print_carrier_aggregation(status, true)
+        display.print_neighbours(status, 5)
+        draw_footer()
 
         io.flush()
 
         -- Audio feedback based on SINR
-        local sinr = nil
-        if status.serving then
-            if status.serving.nr5g and status.serving.nr5g.sinr then
-                sinr = status.serving.nr5g.sinr
-            elseif status.serving.lte and status.serving.lte.sinr then
-                sinr = status.serving.lte.sinr
-            end
-        end
+        local sinr = display.get_sinr(status)
+        do_beeps(sinr)
 
-        if sinr and beeps_enabled then
-            local interval = thresholds.beep_interval(sinr)
-            if interval then
-                local now = os.clock()
-                if now - last_beep_time >= interval then
-                    beep()
-                    last_beep_time = now
-                end
-            end
-        end
+        -- Check if we should exit before sleeping
+        if not running then break end
 
         -- Sleep for refresh interval
-        -- Use os.execute with sleep since we don't have curses timeout
         os.execute("sleep " .. refresh_interval)
     end
 end
@@ -260,33 +136,26 @@ while i <= #arg do
     i = i + 1
 end
 
--- Connect to modem
-local modem = quectel.create_modem()
+-- Setup signal handling
+local has_signals = setup_signal_handler()
 
--- Handle Ctrl+C gracefully
-local function cleanup()
-    modem:close()
-    io.write(RESET)
-    io.flush()
-    os.exit(0)
+-- Connect to modem
+modem = quectel.create_modem()
+
+if has_signals then
+    print("Starting 5G Monitor... (Ctrl+C to quit)")
+else
+    print("Starting 5G Monitor... (Ctrl+C to quit, signal handling not available)")
 end
 
--- Note: Lua doesn't have signal handling, Ctrl+C will just exit
--- The user will see this message
-
-print("Starting 5G Monitor... (Ctrl+C to quit)")
-
--- Run main loop
-local ok, err = pcall(function()
-    main_loop(modem)
-end)
+-- Run main loop with error handling
+local ok, err = pcall(main_loop)
 
 -- Cleanup
-modem:close()
-io.write(RESET)
-io.flush()
+cleanup()
 
-if not ok then
+if not ok and running then
+    -- Only print error if we didn't exit due to signal
     io.stderr:write("Error: " .. tostring(err) .. "\n")
     os.exit(1)
 end

@@ -8,6 +8,7 @@ M.modem = require("quectel.modem")
 M.parser = require("quectel.parser")
 M.frequency = require("quectel.frequency")
 M.thresholds = require("quectel.thresholds")
+M.display = require("quectel.display")
 
 -- Module version
 M.VERSION = "1.0.0"

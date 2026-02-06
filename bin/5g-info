@@ -4,214 +4,10 @@
 package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 
 local quectel = require("quectel")
-local frequency = quectel.frequency
-local thresholds = quectel.thresholds
+local display = quectel.display
 
--- ANSI colors
-local Colors = {
-    RESET = "\027[0m",
-    BOLD = "\027[1m",
-    RED = "\027[91m",
-    GREEN = "\027[92m",
-    YELLOW = "\027[93m",
-    BLUE = "\027[94m",
-    CYAN = "\027[96m",
-    WHITE = "\027[97m",
-}
-
-local use_color = true
 local output_json = false
-
-local function color(col)
-    if use_color then return col else return "" end
-end
-
-local function quality_color(quality)
-    if quality == thresholds.EXCELLENT then return Colors.CYAN end
-    if quality == thresholds.GOOD then return Colors.GREEN end
-    if quality == thresholds.FAIR then return Colors.YELLOW end
-    if quality == thresholds.POOR then return Colors.RED end
-    return Colors.WHITE
-end
-
-local function format_signal(value, quality)
-    if not value then return "-" end
-    local q = quality or ""
-    if q ~= "" then
-        q = string.format(" (%s%s%s)", color(quality_color(quality)), quality, color(Colors.RESET))
-    end
-    return string.format("%d%s", value, q)
-end
-
-local function print_device_info(status)
-    if not status.device then
-        print("Device: unavailable")
-        return
-    end
-    print(string.format("Device: %s %s (%s)",
-        status.device.manufacturer or "?",
-        status.device.model or "?",
-        status.device.revision or "?"))
-    if status.imei then
-        print(string.format("IMEI: %s", status.imei))
-    end
-end
-
-local function print_network_info(status)
-    if not status.operator then
-        print("Network: unavailable")
-        return
-    end
-    print(string.format("Network: %s (%s)",
-        status.operator.operator or "?",
-        status.operator.mcc_mnc or "?"))
-end
-
-local function print_serving_cell(status)
-    if not status.serving then
-        print("\nServing cell: no signal")
-        return
-    end
-
-    local lte = status.serving.lte
-    local nr = status.serving.nr5g
-
-    if lte then
-        local rsrp_q = thresholds.rsrp_quality(lte.rsrp)
-        local rsrq_q = thresholds.rsrq_quality(lte.rsrq)
-        local sinr_q = thresholds.sinr_quality(lte.sinr)
-
-        local enodeb = quectel.extract_enodeb(lte.cell_id) or "?"
-
-        print(string.format("\n%s[LTE - Band %s]%s %s | eNodeB: %s | PCI: %s | TAC: %s",
-            color(Colors.BLUE), lte.band or "?", color(Colors.RESET),
-            lte.duplex or "?", enodeb, lte.pci or "?", lte.tac or "?"))
-
-        local dl_bw = frequency.format_bandwidth(lte.bandwidth_dl_mhz)
-        local ul_bw = frequency.format_bandwidth(lte.bandwidth_ul_mhz)
-        local freq_str = frequency.format_frequency(lte.earfcn or 0, false)
-
-        print(string.format("  Bandwidth: DL %s / UL %s | Freq: %s", dl_bw, ul_bw, freq_str))
-        print(string.format("  Signal: RSRP %s | RSRQ %s | SINR %s",
-            format_signal(lte.rsrp, rsrp_q),
-            format_signal(lte.rsrq, rsrq_q),
-            format_signal(lte.sinr, sinr_q)))
-    end
-
-    if nr then
-        local rsrp_q = thresholds.rsrp_quality(nr.rsrp)
-        local rsrq_q = thresholds.rsrq_quality(nr.rsrq)
-        local sinr_q = thresholds.sinr_quality(nr.sinr)
-
-        print(string.format("\n%s[5G-NSA - Band n%s]%s PCI: %s",
-            color(Colors.GREEN), nr.band or "?", color(Colors.RESET),
-            nr.pci or "?"))
-
-        local bw = frequency.format_bandwidth(nr.bandwidth_mhz)
-        local freq_str = frequency.format_frequency(nr.arfcn or 0, true)
-
-        print(string.format("  Bandwidth: %s | Freq: %s", bw, freq_str))
-        print(string.format("  Signal: RSRP %s | RSRQ %s | SINR %s",
-            format_signal(nr.rsrp, rsrp_q),
-            format_signal(nr.rsrq, rsrq_q),
-            format_signal(nr.sinr, sinr_q)))
-    end
-
-    if not lte and not nr then
-        print("\nServing cell: no signal")
-    end
-end
-
-local function print_carrier_aggregation(status)
-    if not status.ca or (not status.ca.pcc and #status.ca.scc == 0) then
-        print("\nCarrier Aggregation: none")
-        return
-    end
-
-    print(string.format("\n%sCarrier Aggregation:%s", color(Colors.BOLD), color(Colors.RESET)))
-
-    local function print_carrier(carrier)
-        local is_nr = carrier.rat == "nr"
-        local band_name = quectel.format_band(carrier.band, is_nr)
-        local bw = frequency.format_bandwidth(carrier.bandwidth_mhz)
-        local freq_str = frequency.format_frequency(carrier.earfcn or 0, is_nr)
-
-        local col = carrier.role == "pcc" and Colors.BLUE or Colors.CYAN
-        local rsrp_str = carrier.rsrp and tostring(carrier.rsrp) or "-"
-        local sinr_str = carrier.sinr and tostring(carrier.sinr) or "-"
-
-        print(string.format("  %s%s%s %-12s | PCI %3s | RSRP %4s | SINR %4s | %7s | %s",
-            color(col), carrier.role:upper(), color(Colors.RESET),
-            band_name, carrier.pci or "-", rsrp_str, sinr_str, bw, freq_str))
-    end
-
-    if status.ca.pcc then
-        print_carrier(status.ca.pcc)
-    end
-
-    for _, scc in ipairs(status.ca.scc) do
-        print_carrier(scc)
-    end
-end
-
-local function print_neighbours(status)
-    if not status.neighbours or #status.neighbours == 0 then
-        print("\nNeighbour Cells: none detected")
-        return
-    end
-
-    print(string.format("\n%sNeighbour Cells:%s", color(Colors.BOLD), color(Colors.RESET)))
-
-    for _, nb in ipairs(status.neighbours) do
-        local rsrp_q = thresholds.rsrp_quality(nb.rsrp)
-        local rsrp_col = quality_color(rsrp_q)
-        local freq_str = frequency.format_frequency(nb.earfcn or 0, false)
-
-        print(string.format("  %s %-20s | PCI %3s | RSRP %s%4s%s | RSRQ %3s | (%s)",
-            nb.rat:upper(), freq_str, nb.pci or "-",
-            color(rsrp_col), nb.rsrp or "-", color(Colors.RESET),
-            nb.rsrq or "-", nb.scope or "?"))
-    end
-end
-
-local function to_json(value, indent)
-    indent = indent or 0
-    local t = type(value)
-
-    if t == "nil" then
-        return "null"
-    elseif t == "boolean" then
-        return value and "true" or "false"
-    elseif t == "number" then
-        return tostring(value)
-    elseif t == "string" then
-        return string.format('"%s"', value:gsub('"', '\\"'))
-    elseif t == "table" then
-        -- Check if array
-        local is_array = #value > 0 or next(value) == nil
-        if is_array then
-            local items = {}
-            for _, v in ipairs(value) do
-                table.insert(items, to_json(v, indent + 2))
-            end
-            if #items == 0 then return "[]" end
-            return "[\n" .. string.rep(" ", indent + 2) ..
-                   table.concat(items, ",\n" .. string.rep(" ", indent + 2)) ..
-                   "\n" .. string.rep(" ", indent) .. "]"
-        else
-            local items = {}
-            for k, v in pairs(value) do
-                table.insert(items, string.format('"%s": %s', k, to_json(v, indent + 2)))
-            end
-            table.sort(items)
-            if #items == 0 then return "{}" end
-            return "{\n" .. string.rep(" ", indent + 2) ..
-                   table.concat(items, ",\n" .. string.rep(" ", indent + 2)) ..
-                   "\n" .. string.rep(" ", indent) .. "}"
-        end
-    end
-    return "null"
-end
+local section = "all"
 
 local function print_usage()
     print("Usage: 5g-info [OPTIONS]")
@@ -224,15 +20,14 @@ local function print_usage()
 end
 
 -- Parse arguments
-local section = "all"
 local i = 1
 while i <= #arg do
     local a = arg[i]
     if a == "--json" then
         output_json = true
-        use_color = false
+        display.set_color(false)
     elseif a == "--no-color" then
-        use_color = false
+        display.set_color(false)
     elseif a == "--section" then
         i = i + 1
         section = arg[i] or "all"
@@ -247,7 +42,7 @@ end
 local posix_ok, posix = pcall(require, "posix.unistd")
 if posix_ok and posix.isatty then
     if not posix.isatty(1) then
-        use_color = false
+        display.set_color(false)
     end
 end
 
@@ -262,7 +57,7 @@ if not ok or not status then
 end
 
 if output_json then
-    print(to_json(status))
+    print(display.to_json(status))
     modem:close()
     os.exit(0)
 end
@@ -277,15 +72,15 @@ end
 
 for _, s in ipairs(sections) do
     if s == "device" then
-        print_device_info(status)
+        display.print_device_info(status)
     elseif s == "network" then
-        print_network_info(status)
+        display.print_network_info(status)
     elseif s == "serving" then
-        print_serving_cell(status)
+        display.print_serving_cell(status, false)
     elseif s == "ca" then
-        print_carrier_aggregation(status)
+        display.print_carrier_aggregation(status, false)
     elseif s == "neighbours" then
-        print_neighbours(status)
+        display.print_neighbours(status, nil)
     end
 end
 
