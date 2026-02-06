@@ -112,8 +112,8 @@ local function main_loop()
         io.write(display.CLEAR .. display.HOME .. display.HIDE_CURSOR)
 
         draw_header(status)
-        display.print_serving_cell(status, true)
-        display.print_carrier_aggregation(status, true)
+        display.print_serving_cell(status)
+        display.print_carrier_aggregation(status)
         display.print_neighbours(status, 5)
         draw_footer()
 

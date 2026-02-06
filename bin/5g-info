@@ -76,9 +76,9 @@ for _, s in ipairs(sections) do
     elseif s == "network" then
         display.print_network_info(status)
     elseif s == "serving" then
-        display.print_serving_cell(status, false)
+        display.print_serving_cell(status)
     elseif s == "ca" then
-        display.print_carrier_aggregation(status, false)
+        display.print_carrier_aggregation(status)
     elseif s == "neighbours" then
         display.print_neighbours(status, nil)
     end

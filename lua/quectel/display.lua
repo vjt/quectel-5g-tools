@@ -123,10 +123,9 @@ end
 
 --- Print serving cell section
 -- @param status Modem status
--- @param compact If true, use compact format (for monitor)
-function M.print_serving_cell(status, compact)
+function M.print_serving_cell(status)
     if not status.serving then
-        print(compact and "No serving cell" or "\nServing cell: no signal")
+        print("\nServing cell: no signal")
         return
     end
 
@@ -139,15 +138,9 @@ function M.print_serving_cell(status, compact)
         local sinr_q = thresholds.sinr_quality(lte.sinr)
         local enodeb = extract_enodeb(lte.cell_id) or "?"
 
-        if compact then
-            print(string.format("%s[LTE - Band %s]%s %s | eNodeB: %s | PCI: %s",
-                M.color(M.Colors.BLUE), lte.band or "?", M.color(M.Colors.RESET),
-                lte.duplex or "?", enodeb, lte.pci or "?"))
-        else
-            print(string.format("\n%s[LTE - Band %s]%s %s | eNodeB: %s | PCI: %s | TAC: %s",
-                M.color(M.Colors.BLUE), lte.band or "?", M.color(M.Colors.RESET),
-                lte.duplex or "?", enodeb, lte.pci or "?", lte.tac or "?"))
-        end
+        print(string.format("\n%s[LTE - Band %s]%s %s | eNodeB: %s | PCI: %s | TAC: %s",
+            M.color(M.Colors.BLUE), lte.band or "?", M.color(M.Colors.RESET),
+            lte.duplex or "?", enodeb, lte.pci or "?", lte.tac or "?"))
 
         print(string.format("  RSRP: %s dBm | RSRQ: %s dB | SINR: %s dB",
             M.format_signal(lte.rsrp, rsrp_q),
@@ -181,14 +174,13 @@ function M.print_serving_cell(status, compact)
     end
 
     if not lte and not nr then
-        print(compact and "No serving cell" or "\nServing cell: no signal")
+        print("\nServing cell: no signal")
     end
 end
 
 --- Print carrier aggregation section
 -- @param status Modem status
--- @param compact If true, use compact format
-function M.print_carrier_aggregation(status, compact)
+function M.print_carrier_aggregation(status)
     if not status.ca or (not status.ca.pcc and #status.ca.scc == 0) then
         print("\nCarrier Aggregation: none")
         return
@@ -204,22 +196,14 @@ function M.print_carrier_aggregation(status, compact)
 
         local col = carrier.role == "pcc" and M.Colors.BLUE or M.Colors.CYAN
 
-        if compact then
-            print(string.format("  %s%-3s%s %-8s | PCI %3s | RSRP %s | SINR %s",
-                M.color(col), carrier.role:upper(), M.color(M.Colors.RESET),
-                band_name, carrier.pci or "-",
-                M.format_signal(carrier.rsrp, rsrp_q),
-                M.format_signal(carrier.sinr, sinr_q)))
-        else
-            local bw = frequency.format_bandwidth(carrier.bandwidth_mhz)
-            local freq_str = frequency.format_frequency(carrier.earfcn or 0, is_nr)
-            print(string.format("  %s%s%s %-12s | PCI %3s | RSRP %s | SINR %s | %7s | %s",
-                M.color(col), carrier.role:upper(), M.color(M.Colors.RESET),
-                band_name, carrier.pci or "-",
-                M.format_signal(carrier.rsrp, rsrp_q),
-                M.format_signal(carrier.sinr, sinr_q),
-                bw, freq_str))
-        end
+        local bw = frequency.format_bandwidth(carrier.bandwidth_mhz)
+        local freq_str = frequency.format_frequency(carrier.earfcn or 0, is_nr)
+        print(string.format("  %s%-3s%s %-8s | PCI %3s | RSRP %s | SINR %s | %7s | %s",
+            M.color(col), carrier.role:upper(), M.color(M.Colors.RESET),
+            band_name, carrier.pci or "-",
+            M.format_signal(carrier.rsrp, rsrp_q),
+            M.format_signal(carrier.sinr, sinr_q),
+            bw, freq_str))
     end
 
     if status.ca.pcc then
