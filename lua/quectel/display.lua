@@ -224,12 +224,23 @@ function M.print_neighbours(status, max_rows)
         return
     end
 
+    -- Sort by RSRP descending (strongest first)
+    local sorted = {}
+    for _, nb in ipairs(status.neighbours) do
+        table.insert(sorted, nb)
+    end
+    table.sort(sorted, function(a, b)
+        local rsrp_a = a.rsrp or -999
+        local rsrp_b = b.rsrp or -999
+        return rsrp_a > rsrp_b
+    end)
+
     print(string.format("\n%sNeighbour Cells:%s", M.color(M.Colors.BOLD), M.color(M.Colors.RESET)))
 
     local count = 0
-    for _, nb in ipairs(status.neighbours) do
+    for _, nb in ipairs(sorted) do
         if max_rows and count >= max_rows then
-            print(string.format("  ... and %d more", #status.neighbours - count))
+            print(string.format("  ... and %d more", #sorted - count))
             break
         end
 
