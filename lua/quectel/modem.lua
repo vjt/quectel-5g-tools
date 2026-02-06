@@ -261,6 +261,48 @@ function M:set_bands(setting, bands)
     return resp:match("OK") ~= nil
 end
 
+--- Backfill NR5G carrier aggregation entries with serving cell data
+-- QCAINFO for NR5G only provides: arfcn, bandwidth, band, pci
+-- But servingcell provides: rsrp, rsrq, sinr, bandwidth_mhz
+-- Match by PCI or ARFCN to backfill missing data
+-- @param status Status table with serving and ca fields
+local function backfill_nr5g_from_serving(status)
+    if not status.serving or not status.serving.nr5g then return end
+    if not status.ca then return end
+
+    local nr = status.serving.nr5g
+
+    -- Helper to backfill a single carrier
+    local function backfill_carrier(carrier)
+        if carrier.rat ~= "nr" then return end
+
+        -- Match by PCI or ARFCN
+        local pci_match = carrier.pci and nr.pci and carrier.pci == nr.pci
+        local arfcn_match = carrier.earfcn and nr.arfcn and carrier.earfcn == nr.arfcn
+        if not pci_match and not arfcn_match then return end
+
+        -- Backfill signal values if missing
+        if not carrier.rsrp and nr.rsrp then carrier.rsrp = nr.rsrp end
+        if not carrier.rsrq and nr.rsrq then carrier.rsrq = nr.rsrq end
+        if not carrier.sinr and nr.sinr then carrier.sinr = nr.sinr end
+
+        -- Backfill bandwidth if we have it from serving cell
+        if not carrier.bandwidth_mhz and nr.bandwidth_mhz then
+            carrier.bandwidth_mhz = nr.bandwidth_mhz
+        end
+    end
+
+    -- Check PCC
+    if status.ca.pcc then
+        backfill_carrier(status.ca.pcc)
+    end
+
+    -- Check all SCCs
+    for _, scc in ipairs(status.ca.scc or {}) do
+        backfill_carrier(scc)
+    end
+end
+
 --- Get complete modem status
 -- Returns all information needed for monitoring/exporting
 -- @return Table with device, operator, serving, ca, neighbours
@@ -325,6 +367,9 @@ function M:get_status()
                 scc.bandwidth_mhz = frequency.lte_bandwidth_mhz(scc.bandwidth_rb, true)
             end
         end
+
+        -- Backfill NR5G signal data from serving cell
+        backfill_nr5g_from_serving(status)
     end
 
     return status
@@ -391,6 +436,9 @@ function M:get_signal_status()
                 scc.bandwidth_mhz = frequency.lte_bandwidth_mhz(scc.bandwidth_rb, true)
             end
         end
+
+        -- Backfill NR5G signal data from serving cell
+        backfill_nr5g_from_serving(status)
     end
 
     return status
