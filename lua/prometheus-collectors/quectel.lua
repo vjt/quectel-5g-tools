@@ -5,10 +5,20 @@
 -- - AT+QENG="servingcell"
 -- - AT+QCAINFO
 -- This is much lighter than get_status() which makes 6 commands.
+--
+-- Compatible with both old (2024.06.16) and newer prometheus-node-exporter-lua:
+-- - Old version: scrape() with no args, uses global metric()
+-- - New version: scrape(metric) with callback parameter
 
 local quectel = require("quectel")
 
-local function scrape(metric)
+local function scrape(metric_fn)
+    -- Support both old (global metric) and new (passed metric_fn) interfaces
+    local emit = metric_fn or metric
+    if not emit then
+        error("No metric function available - check prometheus-node-exporter-lua installation")
+    end
+
     local modem = quectel.create_modem()
 
     -- Use lightweight status - only serving cell and CA info (2 AT commands)
@@ -79,7 +89,7 @@ local function scrape(metric)
 
     -- Emit cell_state metrics
     for _, cell in ipairs(cells) do
-        metric("modem_cell_state", "gauge", {
+        emit("modem_cell_state", "gauge", {
             role = cell.role,
             rat = cell.rat,
             band = quectel.format_band(cell.band, cell.rat == "nr"),
@@ -99,16 +109,16 @@ local function scrape(metric)
         }
 
         if cell.rsrp then
-            metric("modem_signal_rsrp_dbm", "gauge", labels, cell.rsrp)
+            emit("modem_signal_rsrp_dbm", "gauge", labels, cell.rsrp)
         end
         if cell.rsrq then
-            metric("modem_signal_rsrq_db", "gauge", labels, cell.rsrq)
+            emit("modem_signal_rsrq_db", "gauge", labels, cell.rsrq)
         end
         if cell.sinr then
-            metric("modem_signal_sinr_db", "gauge", labels, cell.sinr)
+            emit("modem_signal_sinr_db", "gauge", labels, cell.sinr)
         end
         if cell.frequency_mhz then
-            metric("modem_frequency_mhz", "gauge", labels, cell.frequency_mhz)
+            emit("modem_frequency_mhz", "gauge", labels, cell.frequency_mhz)
         end
     end
 
@@ -125,13 +135,13 @@ local function scrape(metric)
             local labels = {}
             for k, v in pairs(base_labels) do labels[k] = v end
             labels.direction = "dl"
-            metric("modem_bandwidth_mhz", "gauge", labels, cell.bandwidth_dl_mhz)
+            emit("modem_bandwidth_mhz", "gauge", labels, cell.bandwidth_dl_mhz)
         end
         if cell.bandwidth_ul_mhz then
             local labels = {}
             for k, v in pairs(base_labels) do labels[k] = v end
             labels.direction = "ul"
-            metric("modem_bandwidth_mhz", "gauge", labels, cell.bandwidth_ul_mhz)
+            emit("modem_bandwidth_mhz", "gauge", labels, cell.bandwidth_ul_mhz)
         end
     end
 
