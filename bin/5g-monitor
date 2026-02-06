@@ -8,6 +8,12 @@ local quectel = require("quectel")
 local display = quectel.display
 local thresholds = quectel.thresholds
 
+-- Try to load posix modules
+local posix_time = nil
+local posix_signal = nil
+pcall(function() posix_time = require("posix.time") end)
+pcall(function() posix_signal = require("posix.signal") end)
+
 -- Configuration
 local config = quectel.load_config()
 local refresh_interval = config.refresh_interval or 5
@@ -18,14 +24,30 @@ if beeps_enabled == nil then beeps_enabled = true end
 local running = true
 local modem = nil
 
+-- Interruptible sleep using posix.time.nanosleep
+local function sleep(seconds)
+    if posix_time and posix_time.nanosleep then
+        local sec = math.floor(seconds)
+        local nsec = math.floor((seconds - sec) * 1e9)
+        posix_time.nanosleep({tv_sec = sec, tv_nsec = nsec})
+    else
+        -- Fallback to os.execute, but check running flag frequently
+        local remaining = seconds
+        while remaining > 0 and running do
+            local chunk = math.min(remaining, 0.5)
+            os.execute("sleep " .. chunk)
+            remaining = remaining - chunk
+        end
+    end
+end
+
 -- Signal handling for Ctrl+C
 local function setup_signal_handler()
-    local ok, signal = pcall(require, "posix.signal")
-    if ok and signal.signal then
-        signal.signal(signal.SIGINT, function()
+    if posix_signal and posix_signal.signal then
+        posix_signal.signal(posix_signal.SIGINT, function()
             running = false
         end)
-        signal.signal(signal.SIGTERM, function()
+        posix_signal.signal(posix_signal.SIGTERM, function()
             running = false
         end)
         return true
@@ -106,8 +128,8 @@ local function main_loop()
         -- Check if we should exit before sleeping
         if not running then break end
 
-        -- Sleep for refresh interval
-        os.execute("sleep " .. refresh_interval)
+        -- Sleep for refresh interval (interruptible)
+        sleep(refresh_interval)
     end
 end
 

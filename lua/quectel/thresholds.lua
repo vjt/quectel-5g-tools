@@ -104,28 +104,35 @@ end
 
 --- Calculate number of beeps based on SINR
 -- Better signal = more beeps for audio feedback while pointing antenna
+-- Matches legacy Python implementation thresholds
 -- @param sinr SINR value in dB
--- @return Number of beeps (0-4), or nil to disable
+-- @return Number of beeps (0-6)
 function M.beep_count(sinr)
-    if not sinr then return nil end
+    if not sinr then return 0 end
 
-    -- Map SINR to beep count
-    -- SINR < 0: no beeps (poor)
-    -- SINR 0-10: 1 beep (fair)
-    -- SINR 10-20: 2 beeps (good)
-    -- SINR 20-30: 3 beeps (excellent)
-    -- SINR > 30: 4 beeps (outstanding)
+    -- Map SINR to beep count (from legacy Python)
+    -- SINR >= 19: 6 beeps
+    -- SINR >= 18: 5 beeps
+    -- SINR >= 17: 4 beeps
+    -- SINR >= 16: 3 beeps
+    -- SINR >= 14: 2 beeps
+    -- SINR >= 12: 1 beep
+    -- SINR < 12: no beeps
 
-    if sinr < 0 then
-        return 0
-    elseif sinr < 10 then
-        return 1
-    elseif sinr < 20 then
-        return 2
-    elseif sinr < 30 then
-        return 3
-    else
+    if sinr >= 19 then
+        return 6
+    elseif sinr >= 18 then
+        return 5
+    elseif sinr >= 17 then
         return 4
+    elseif sinr >= 16 then
+        return 3
+    elseif sinr >= 14 then
+        return 2
+    elseif sinr >= 12 then
+        return 1
+    else
+        return 0
     end
 end
 

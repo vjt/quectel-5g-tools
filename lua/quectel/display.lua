@@ -260,10 +260,10 @@ end
 
 --- Emit beeps with delay between them
 -- @param count Number of beeps (default 1)
--- @param delay Delay between beeps in seconds (default 0.7)
+-- @param delay Delay between beeps in seconds (default 0.6)
 function M.beep(count, delay)
     count = count or 1
-    delay = delay or 0.7
+    delay = delay or 0.6
 
     for i = 1, count do
         io.write("\a")
