@@ -202,74 +202,71 @@ function M.parse_qcainfo(text)
 
     for values in M.parse_response(text, "+QCAINFO") do
         local num_fields = #values
-        if num_fields < 5 then
-            goto continue
-        end
+        -- Lua 5.1 compatible: use if instead of goto
+        if num_fields >= 5 then
+            local role = values[1]  -- "PCC" or "SCC"
+            local band_str = values[4] or ""
 
-        local role = values[1]  -- "PCC" or "SCC"
-        local band_str = values[4] or ""
+            -- Parse band string like "LTE BAND 1" or "NR5G BAND 78"
+            local rat, band_num = band_str:match("(%w+) BAND (%d+)")
+            local is_nr = (rat == "NR5G")
 
-        -- Parse band string like "LTE BAND 1" or "NR5G BAND 78"
-        local rat, band_num = band_str:match("(%w+) BAND (%d+)")
-        local is_nr = (rat == "NR5G")
+            local carrier = {
+                role = role:lower(),
+                earfcn = parse_int(values[2]),
+                bandwidth_rb = parse_int(values[3]),
+                band = tonumber(band_num),
+                rat = is_nr and "nr" or "lte",
+            }
 
-        local carrier = {
-            role = role:lower(),
-            earfcn = parse_int(values[2]),
-            bandwidth_rb = parse_int(values[3]),
-            band = tonumber(band_num),
-            rat = is_nr and "nr" or "lte",
-        }
-
-        if role == "PCC" then
-            -- PCC always has 10 fields: role,earfcn,bw,band,state,pci,rsrp,rsrq,rssi,sinr
-            if num_fields >= 10 then
-                carrier.state = parse_int(values[5])
-                carrier.pci = parse_int(values[6])
-                carrier.rsrp = parse_int(values[7])
-                carrier.rsrq = parse_int(values[8])
-                carrier.rssi = parse_int(values[9])
-                carrier.sinr = parse_int(values[10])
+            if role == "PCC" then
+                -- PCC always has 10 fields: role,earfcn,bw,band,state,pci,rsrp,rsrq,rssi,sinr
+                if num_fields >= 10 then
+                    carrier.state = parse_int(values[5])
+                    carrier.pci = parse_int(values[6])
+                    carrier.rsrp = parse_int(values[7])
+                    carrier.rsrq = parse_int(values[8])
+                    carrier.rssi = parse_int(values[9])
+                    carrier.sinr = parse_int(values[10])
+                end
+                result.pcc = carrier
+            else
+                -- SCC format varies by field count
+                if num_fields == 5 then
+                    -- NR5G SCC: role,arfcn,bw_idx,band,pci
+                    carrier.pci = parse_int(values[5])
+                elseif num_fields == 9 then
+                    -- SCC without signal: role,earfcn,bw,band,state,pci,ul_cfg,ul_band,ul_earfcn
+                    carrier.state = parse_int(values[5])
+                    carrier.pci = parse_int(values[6])
+                    carrier.ul_configured = parse_int(values[7])
+                    carrier.ul_band = values[8] ~= "-" and values[8] or nil
+                    carrier.ul_earfcn = parse_int(values[9])
+                elseif num_fields == 12 then
+                    -- SCC with signal (different order): role,earfcn,bw,band,state,pci,ul_cfg,ul_band,ul_earfcn,rsrp,rsrq,sinr
+                    carrier.state = parse_int(values[5])
+                    carrier.pci = parse_int(values[6])
+                    carrier.ul_configured = parse_int(values[7])
+                    carrier.ul_band = values[8] ~= "-" and values[8] or nil
+                    carrier.ul_earfcn = parse_int(values[9])
+                    carrier.rsrp = parse_int(values[10])
+                    carrier.rsrq = parse_int(values[11])
+                    carrier.sinr = parse_int(values[12])
+                elseif num_fields >= 13 then
+                    -- Full SCC: role,earfcn,bw,band,state,pci,rsrp,rsrq,rssi,sinr,ul_cfg,ul_band,ul_earfcn
+                    carrier.state = parse_int(values[5])
+                    carrier.pci = parse_int(values[6])
+                    carrier.rsrp = parse_int(values[7])
+                    carrier.rsrq = parse_int(values[8])
+                    carrier.rssi = parse_int(values[9])
+                    carrier.sinr = parse_int(values[10])
+                    carrier.ul_configured = parse_int(values[11])
+                    carrier.ul_band = values[12] ~= "-" and values[12] or nil
+                    carrier.ul_earfcn = parse_int(values[13])
+                end
+                table.insert(result.scc, carrier)
             end
-            result.pcc = carrier
-        else
-            -- SCC format varies by field count
-            if num_fields == 5 then
-                -- NR5G SCC: role,arfcn,bw_idx,band,pci
-                carrier.pci = parse_int(values[5])
-            elseif num_fields == 9 then
-                -- SCC without signal: role,earfcn,bw,band,state,pci,ul_cfg,ul_band,ul_earfcn
-                carrier.state = parse_int(values[5])
-                carrier.pci = parse_int(values[6])
-                carrier.ul_configured = parse_int(values[7])
-                carrier.ul_band = values[8] ~= "-" and values[8] or nil
-                carrier.ul_earfcn = parse_int(values[9])
-            elseif num_fields == 12 then
-                -- SCC with signal (different order): role,earfcn,bw,band,state,pci,ul_cfg,ul_band,ul_earfcn,rsrp,rsrq,sinr
-                carrier.state = parse_int(values[5])
-                carrier.pci = parse_int(values[6])
-                carrier.ul_configured = parse_int(values[7])
-                carrier.ul_band = values[8] ~= "-" and values[8] or nil
-                carrier.ul_earfcn = parse_int(values[9])
-                carrier.rsrp = parse_int(values[10])
-                carrier.rsrq = parse_int(values[11])
-                carrier.sinr = parse_int(values[12])
-            elseif num_fields >= 13 then
-                -- Full SCC: role,earfcn,bw,band,state,pci,rsrp,rsrq,rssi,sinr,ul_cfg,ul_band,ul_earfcn
-                carrier.state = parse_int(values[5])
-                carrier.pci = parse_int(values[6])
-                carrier.rsrp = parse_int(values[7])
-                carrier.rsrq = parse_int(values[8])
-                carrier.rssi = parse_int(values[9])
-                carrier.sinr = parse_int(values[10])
-                carrier.ul_configured = parse_int(values[11])
-                carrier.ul_band = values[12] ~= "-" and values[12] or nil
-                carrier.ul_earfcn = parse_int(values[13])
-            end
-            table.insert(result.scc, carrier)
         end
-
-        ::continue::
     end
 
     return result
