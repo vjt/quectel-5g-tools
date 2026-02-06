@@ -2,6 +2,7 @@
 -- Uses luaposix for serial I/O
 
 local posix = require("posix")
+local posix_time = require("posix.time")
 local parser = require("quectel.parser")
 local frequency = require("quectel.frequency")
 
@@ -11,6 +12,44 @@ M.__index = M
 -- Default configuration
 local DEFAULT_DEVICE = "/dev/ttyUSB2"
 local DEFAULT_TIMEOUT = 2  -- seconds
+local LOCK_FILE = "/var/lock/quectel-modem.lock"
+local COMMAND_DELAY = 0.1  -- seconds between commands to reduce USB stress
+
+--- Sleep for specified seconds using nanosleep
+local function sleep(seconds)
+    local sec = math.floor(seconds)
+    local nsec = math.floor((seconds - sec) * 1e9)
+    posix_time.nanosleep({tv_sec = sec, tv_nsec = nsec})
+end
+
+--- Acquire exclusive lock on modem
+-- @return lock file descriptor on success, nil + error on failure
+local function acquire_lock()
+    -- Create lock directory if it doesn't exist
+    os.execute("mkdir -p /var/lock 2>/dev/null")
+
+    local fd, err = posix.open(LOCK_FILE, posix.O_CREAT + posix.O_RDWR, 420) -- 0644
+    if not fd then
+        return nil, "Failed to open lock file: " .. (err or "unknown")
+    end
+
+    -- Try to get exclusive lock (non-blocking)
+    local ok = posix.flock(fd, posix.LOCK_EX + posix.LOCK_NB)
+    if not ok then
+        posix.close(fd)
+        return nil, "Modem is locked by another process"
+    end
+
+    return fd
+end
+
+--- Release lock
+local function release_lock(lock_fd)
+    if lock_fd then
+        posix.flock(lock_fd, posix.LOCK_UN)
+        posix.close(lock_fd)
+    end
+end
 
 --- Create a new modem instance
 -- @param device Serial device path (default: /dev/ttyUSB2)
@@ -21,14 +60,24 @@ function M.new(device, timeout)
     self.device = device or DEFAULT_DEVICE
     self.timeout = timeout or DEFAULT_TIMEOUT
     self.fd = nil
+    self.lock_fd = nil
     return self
 end
 
 --- Open the serial port
 -- @return true on success, nil + error on failure
 function M:open()
+    -- Acquire lock first
+    local lock_fd, lock_err = acquire_lock()
+    if not lock_fd then
+        return nil, lock_err
+    end
+    self.lock_fd = lock_fd
+
     local fd, err = posix.open(self.device, posix.O_RDWR + posix.O_NOCTTY + posix.O_NONBLOCK)
     if not fd then
+        release_lock(self.lock_fd)
+        self.lock_fd = nil
         return nil, "Failed to open " .. self.device .. ": " .. (err or "unknown error")
     end
     self.fd = fd
@@ -55,6 +104,10 @@ function M:close()
         posix.close(self.fd)
         self.fd = nil
     end
+    if self.lock_fd then
+        release_lock(self.lock_fd)
+        self.lock_fd = nil
+    end
 end
 
 --- Send AT command and read response
@@ -73,8 +126,8 @@ function M:send(command)
         return nil, "Failed to write command"
     end
 
-    -- Small delay to let modem process command
-    os.execute("sleep 0.1")
+    -- Small delay to let modem process command (using nanosleep, not os.execute)
+    sleep(COMMAND_DELAY)
 
     -- Read response with timeout using non-blocking reads
     local response = {}
@@ -103,7 +156,7 @@ function M:send(command)
             if os.time() - last_read_time > 1 then
                 break
             end
-            os.execute("sleep 0.05")
+            sleep(0.05)
         end
     end
 
