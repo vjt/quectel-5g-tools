@@ -106,6 +106,15 @@ AT+QENG="neighbourcell"
 OK
 ```
 
+## SINR vs RSSNR
+
+**Important**: The `AT+QCAINFO` command reports a field that Quectel documentation calls `rssnr`, which is **NOT** the same as SINR from `AT+QENG="servingcell"`.
+
+- **SINR** (from `QENG="servingcell"`): Authoritative Signal-to-Interference-plus-Noise Ratio in dB
+- **RSSNR** (from `QCAINFO`): A different metric that can differ significantly from SINR
+
+The parser stores QCAINFO's last numeric field as `rssnr`, and the backfill logic in `modem.lua` populates the `sinr` field from the matching serving cell data. This ensures displayed SINR values are accurate.
+
 ## Documentation
 
 - `README.md` - User documentation

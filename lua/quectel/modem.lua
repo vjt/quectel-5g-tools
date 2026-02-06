@@ -261,45 +261,59 @@ function M:set_bands(setting, bands)
     return resp:match("OK") ~= nil
 end
 
---- Backfill NR5G carrier aggregation entries with serving cell data
--- QCAINFO for NR5G only provides: arfcn, bandwidth, band, pci
--- But servingcell provides: rsrp, rsrq, sinr, bandwidth_mhz
--- Match by PCI or ARFCN to backfill missing data
+--- Backfill carrier aggregation entries with serving cell data
+-- QCAINFO reports rssnr which is NOT the same as SINR from QENG="servingcell"
+-- We backfill authoritative signal data from serving cell when available
+-- Match by PCI and ARFCN to identify the same cell
 -- @param status Status table with serving and ca fields
-local function backfill_nr5g_from_serving(status)
-    if not status.serving or not status.serving.nr5g then return end
+local function backfill_from_serving(status)
+    if not status.serving then return end
     if not status.ca then return end
 
+    local lte = status.serving.lte
     local nr = status.serving.nr5g
 
-    -- Helper to backfill a single carrier
-    local function backfill_carrier(carrier)
-        if carrier.rat ~= "5g" then return end
+    -- Helper to backfill a single carrier from a serving cell source
+    local function backfill_carrier(carrier, source)
+        if not source then return end
 
-        -- Match by PCI or ARFCN
-        local pci_match = carrier.pci and nr.pci and carrier.pci == nr.pci
-        local arfcn_match = carrier.earfcn and nr.arfcn and carrier.earfcn == nr.arfcn
-        if not pci_match and not arfcn_match then return end
+        -- Match by PCI and ARFCN/EARFCN
+        local pci_match = carrier.pci and source.pci and carrier.pci == source.pci
+        local arfcn_key = carrier.rat == "5g" and "arfcn" or "earfcn"
+        local carrier_arfcn = carrier.earfcn
+        local source_arfcn = source[arfcn_key] or source.earfcn
+        local arfcn_match = carrier_arfcn and source_arfcn and carrier_arfcn == source_arfcn
+
+        if not (pci_match or arfcn_match) then return end
 
         -- Backfill signal values if missing
-        if not carrier.rsrp and nr.rsrp then carrier.rsrp = nr.rsrp end
-        if not carrier.rsrq and nr.rsrq then carrier.rsrq = nr.rsrq end
-        if not carrier.sinr and nr.sinr then carrier.sinr = nr.sinr end
+        if not carrier.rsrp and source.rsrp then carrier.rsrp = source.rsrp end
+        if not carrier.rsrq and source.rsrq then carrier.rsrq = source.rsrq end
+        if not carrier.sinr and source.sinr then carrier.sinr = source.sinr end
 
-        -- Backfill bandwidth if we have it from serving cell
-        if not carrier.bandwidth_mhz and nr.bandwidth_mhz then
-            carrier.bandwidth_mhz = nr.bandwidth_mhz
+        -- Backfill bandwidth if available
+        if not carrier.bandwidth_mhz and source.bandwidth_mhz then
+            carrier.bandwidth_mhz = source.bandwidth_mhz
+        end
+    end
+
+    -- Helper to process a carrier against appropriate serving cell
+    local function process_carrier(carrier)
+        if carrier.rat == "5g" then
+            backfill_carrier(carrier, nr)
+        else
+            backfill_carrier(carrier, lte)
         end
     end
 
     -- Check PCC
     if status.ca.pcc then
-        backfill_carrier(status.ca.pcc)
+        process_carrier(status.ca.pcc)
     end
 
     -- Check all SCCs
     for _, scc in ipairs(status.ca.scc or {}) do
-        backfill_carrier(scc)
+        process_carrier(scc)
     end
 end
 
@@ -368,8 +382,8 @@ function M:get_status()
             end
         end
 
-        -- Backfill NR5G signal data from serving cell
-        backfill_nr5g_from_serving(status)
+        -- Backfill SINR from serving cell (authoritative source)
+        backfill_from_serving(status)
     end
 
     return status
@@ -437,8 +451,8 @@ function M:get_signal_status()
             end
         end
 
-        -- Backfill NR5G signal data from serving cell
-        backfill_nr5g_from_serving(status)
+        -- Backfill SINR from serving cell (authoritative source)
+        backfill_from_serving(status)
     end
 
     return status

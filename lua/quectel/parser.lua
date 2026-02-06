@@ -176,13 +176,15 @@ end
 -- Formats from Quectel RM520N-GL documentation:
 --
 -- PCC (10 fields):
---   +QCAINFO: "PCC",<earfcn>,<bandwidth>,<band>,<state>,<pcid>,<rsrp>,<rsrq>,<rssi>,<sinr>
+--   +QCAINFO: "PCC",<earfcn>,<bandwidth>,<band>,<state>,<pcid>,<rsrp>,<rsrq>,<rssi>,<rssnr>
 --
 -- SCC formats vary by field count:
 --   5 fields (NR5G):  "SCC",<arfcn>,<bw_idx>,<band>,<pcid>
 --   9 fields:         "SCC",<earfcn>,<bw>,<band>,<state>,<pcid>,<ul_cfg>,<ul_band>,<ul_earfcn>
---   12 fields:        "SCC",<earfcn>,<bw>,<band>,<state>,<pcid>,<ul_cfg>,<ul_band>,<ul_earfcn>,<rsrp>,<rsrq>,<sinr>
---   13 fields:        "SCC",<earfcn>,<bw>,<band>,<state>,<pcid>,<rsrp>,<rsrq>,<rssi>,<sinr>,<ul_cfg>,<ul_band>,<ul_earfcn>
+--   12 fields:        "SCC",<earfcn>,<bw>,<band>,<state>,<pcid>,<ul_cfg>,<ul_band>,<ul_earfcn>,<rsrp>,<rsrq>,<rssnr>
+--   13 fields:        "SCC",<earfcn>,<bw>,<band>,<state>,<pcid>,<rsrp>,<rsrq>,<rssi>,<rssnr>,<ul_cfg>,<ul_band>,<ul_earfcn>
+--
+-- Note: rssnr is NOT the same as SINR from QENG="servingcell". Use serving cell SINR for display.
 --
 -- Examples:
 --   +QCAINFO: "PCC",1350,100,"LTE BAND 3",1,427,-94,-15,-58,-1
@@ -220,14 +222,14 @@ function M.parse_qcainfo(text)
             }
 
             if role == "PCC" then
-                -- PCC always has 10 fields: role,earfcn,bw,band,state,pci,rsrp,rsrq,rssi,sinr
+                -- PCC always has 10 fields: role,earfcn,bw,band,state,pci,rsrp,rsrq,rssi,rssnr
                 if num_fields >= 10 then
                     carrier.state = parse_int(values[5])
                     carrier.pci = parse_int(values[6])
                     carrier.rsrp = parse_int(values[7])
                     carrier.rsrq = parse_int(values[8])
                     carrier.rssi = parse_int(values[9])
-                    carrier.sinr = parse_int(values[10])
+                    carrier.rssnr = parse_int(values[10])
                 end
                 result.pcc = carrier
             else
@@ -243,7 +245,7 @@ function M.parse_qcainfo(text)
                     carrier.ul_band = values[8] ~= "-" and values[8] or nil
                     carrier.ul_earfcn = parse_int(values[9])
                 elseif num_fields == 12 then
-                    -- SCC with signal (different order): role,earfcn,bw,band,state,pci,ul_cfg,ul_band,ul_earfcn,rsrp,rsrq,sinr
+                    -- SCC with signal (different order): role,earfcn,bw,band,state,pci,ul_cfg,ul_band,ul_earfcn,rsrp,rsrq,rssnr
                     carrier.state = parse_int(values[5])
                     carrier.pci = parse_int(values[6])
                     carrier.ul_configured = parse_int(values[7])
@@ -251,15 +253,15 @@ function M.parse_qcainfo(text)
                     carrier.ul_earfcn = parse_int(values[9])
                     carrier.rsrp = parse_int(values[10])
                     carrier.rsrq = parse_int(values[11])
-                    carrier.sinr = parse_int(values[12])
+                    carrier.rssnr = parse_int(values[12])
                 elseif num_fields >= 13 then
-                    -- Full SCC: role,earfcn,bw,band,state,pci,rsrp,rsrq,rssi,sinr,ul_cfg,ul_band,ul_earfcn
+                    -- Full SCC: role,earfcn,bw,band,state,pci,rsrp,rsrq,rssi,rssnr,ul_cfg,ul_band,ul_earfcn
                     carrier.state = parse_int(values[5])
                     carrier.pci = parse_int(values[6])
                     carrier.rsrp = parse_int(values[7])
                     carrier.rsrq = parse_int(values[8])
                     carrier.rssi = parse_int(values[9])
-                    carrier.sinr = parse_int(values[10])
+                    carrier.rssnr = parse_int(values[10])
                     carrier.ul_configured = parse_int(values[11])
                     carrier.ul_band = values[12] ~= "-" and values[12] or nil
                     carrier.ul_earfcn = parse_int(values[13])
