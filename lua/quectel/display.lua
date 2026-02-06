@@ -261,15 +261,20 @@ end
 --- Emit beeps with delay between them
 -- @param count Number of beeps (default 1)
 -- @param delay Delay between beeps in seconds (default 0.6)
-function M.beep(count, delay)
+-- @param sleep_fn Optional custom sleep function (for interruptible sleep)
+-- @param check_fn Optional function that returns false to abort beeping
+function M.beep(count, delay, sleep_fn, check_fn)
     count = count or 1
     delay = delay or 0.6
+    sleep_fn = sleep_fn or function(s) os.execute("sleep " .. s) end
+    check_fn = check_fn or function() return true end
 
     for i = 1, count do
+        if not check_fn() then break end
         io.write("\a")
         io.flush()
-        if i < count then
-            os.execute("sleep " .. delay)
+        if i < count and check_fn() then
+            sleep_fn(delay)
         end
     end
 end

@@ -9,10 +9,8 @@ local display = quectel.display
 local thresholds = quectel.thresholds
 
 -- Try to load posix modules
-local posix_time = nil
-local posix_signal = nil
-pcall(function() posix_time = require("posix.time") end)
-pcall(function() posix_signal = require("posix.signal") end)
+local posix_time = require("posix.time")
+local posix_signal = require("posix.signal")
 
 -- Configuration
 local config = quectel.load_config()
@@ -24,35 +22,26 @@ if beeps_enabled == nil then beeps_enabled = true end
 local running = true
 local modem = nil
 
--- Interruptible sleep using posix.time.nanosleep
+-- Sleep using posix.time.nanosleep (interruptible by signals)
 local function sleep(seconds)
-    if posix_time and posix_time.nanosleep then
-        local sec = math.floor(seconds)
-        local nsec = math.floor((seconds - sec) * 1e9)
-        posix_time.nanosleep({tv_sec = sec, tv_nsec = nsec})
-    else
-        -- Fallback to os.execute, but check running flag frequently
-        local remaining = seconds
-        while remaining > 0 and running do
-            local chunk = math.min(remaining, 0.5)
-            os.execute("sleep " .. chunk)
-            remaining = remaining - chunk
-        end
-    end
+    local sec = math.floor(seconds)
+    local nsec = math.floor((seconds - sec) * 1e9)
+    posix_time.nanosleep({tv_sec = sec, tv_nsec = nsec})
+end
+
+-- Check function for interruptible operations
+local function is_running()
+    return running
 end
 
 -- Signal handling for Ctrl+C
 local function setup_signal_handler()
-    if posix_signal and posix_signal.signal then
-        posix_signal.signal(posix_signal.SIGINT, function()
-            running = false
-        end)
-        posix_signal.signal(posix_signal.SIGTERM, function()
-            running = false
-        end)
-        return true
-    end
-    return false
+    posix_signal.signal(posix_signal.SIGINT, function()
+        running = false
+    end)
+    posix_signal.signal(posix_signal.SIGTERM, function()
+        running = false
+    end)
 end
 
 local function cleanup()
@@ -94,11 +83,11 @@ local function draw_footer()
 end
 
 local function do_beeps(sinr)
-    if not beeps_enabled or not sinr then return end
+    if not beeps_enabled or not sinr or not running then return end
 
     local num_beeps = thresholds.beep_count(sinr)
     if num_beeps and num_beeps > 0 then
-        display.beep(num_beeps, 0.7)
+        display.beep(num_beeps, 0.6, sleep, is_running)
     end
 end
 
@@ -159,16 +148,12 @@ while i <= #arg do
 end
 
 -- Setup signal handling
-local has_signals = setup_signal_handler()
+setup_signal_handler()
 
 -- Connect to modem
 modem = quectel.create_modem()
 
-if has_signals then
-    print("Starting 5G Monitor... (Ctrl+C to quit)")
-else
-    print("Starting 5G Monitor... (Ctrl+C to quit, signal handling not available)")
-end
+print("Starting 5G Monitor... (Ctrl+C to quit)")
 
 -- Run main loop with error handling
 local ok, err = pcall(main_loop)
