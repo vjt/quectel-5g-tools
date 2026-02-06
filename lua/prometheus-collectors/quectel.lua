@@ -35,7 +35,7 @@ local function scrape()
         local lte = status.serving.lte
         table.insert(cells, {
             role = "pcc",
-            rat = "lte",
+            technology = "lte",
             band = lte.band,
             pci = lte.pci,
             enodeb = quectel.extract_enodeb(lte.cell_id),
@@ -54,7 +54,7 @@ local function scrape()
         local nr = status.serving.nr5g
         table.insert(cells, {
             role = "nsa",
-            rat = "nr",
+            technology = "5g",
             band = nr.band,
             pci = nr.pci,
             enodeb = 0,
@@ -79,7 +79,7 @@ local function scrape()
             if not is_duplicate then
                 table.insert(cells, {
                     role = "scc",
-                    rat = scc.rat,
+                    technology = scc.rat == "nr" and "5g" or "lte",
                     band = scc.band,
                     pci = scc.pci,
                     enodeb = 0,
@@ -106,16 +106,16 @@ local function scrape()
     for _, cell in ipairs(cells) do
         local base_labels = {
             role = cell.role,
-            rat = cell.rat,
-            band = quectel.format_band(cell.band, cell.rat == "nr"),
+            technology = cell.technology,
+            band = quectel.format_band(cell.band, cell.technology == "5g"),
             pci = tostring(cell.pci or 0),
         }
 
         -- Cell state (with extra labels)
         local state_labels = {
             role = cell.role,
-            rat = cell.rat,
-            band = quectel.format_band(cell.band, cell.rat == "nr"),
+            technology = cell.technology,
+            band = quectel.format_band(cell.band, cell.technology == "5g"),
             pci = tostring(cell.pci or 0),
             enodeb = tostring(cell.enodeb or 0),
             cell_id = cell.cell_id or "0",
