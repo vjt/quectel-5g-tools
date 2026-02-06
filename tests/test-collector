@@ -15,19 +15,6 @@ if not ok then
     os.exit(0)
 end
 
--- Mock metric function that prints what it receives
-local function mock_metric(name, type, labels, value)
-    local label_parts = {}
-    if labels then
-        for k, v in pairs(labels) do
-            table.insert(label_parts, string.format('%s="%s"', k, tostring(v)))
-        end
-        table.sort(label_parts)
-    end
-    local label_str = "{" .. table.concat(label_parts, ",") .. "}"
-    print(string.format("METRIC: %s%s = %s (type=%s)", name, label_str, tostring(value), type))
-end
-
 print("=== Testing Prometheus Collector ===")
 print("")
 
@@ -96,8 +83,25 @@ print("   OK (type=" .. type(collector.scrape) .. ")")
 print("")
 print("6. Running scrape with mock metric function...")
 print("---")
+
+-- Set global metric function (this is how prometheus-node-exporter-lua works)
+-- The metric() function returns an outputter function
+function metric(name, metric_type)
+    return function(labels, value)
+        local label_parts = {}
+        if labels then
+            for k, v in pairs(labels) do
+                table.insert(label_parts, string.format('%s="%s"', k, tostring(v)))
+            end
+            table.sort(label_parts)
+        end
+        local label_str = "{" .. table.concat(label_parts, ",") .. "}"
+        print(string.format("%s%s %s", name, label_str, tostring(value)))
+    end
+end
+
 local ok, err = pcall(function()
-    collector.scrape(mock_metric)
+    collector.scrape()
 end)
 print("---")
 if not ok then
