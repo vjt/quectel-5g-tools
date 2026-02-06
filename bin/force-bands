@@ -1,77 +1,28 @@
 #!/usr/bin/env lua
--- force-bands: Lock Quectel modem to specific bands
+-- force-bands: Lock Quectel modem to specific bands from UCI config
 
 package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 
 local quectel = require("quectel")
 
 local function print_usage()
-    print("Usage: force-bands [OPTIONS]")
+    print("Usage: force-bands [OPTION]")
     print("")
-    print("Lock Quectel modem to specific bands.")
+    print("Lock Quectel modem to bands configured in UCI.")
     print("")
     print("Options:")
-    print("  --lte BANDS     LTE bands to lock (colon-separated, e.g., 1:3:7:20)")
-    print("  --nr5g BANDS    NR5G bands to lock (colon-separated, e.g., 78)")
-    print("  --reset         Reset to all bands")
-    print("  --verify        Verify current band configuration")
-    print("  --help          Show this help")
+    print("  --apply    Apply band configuration from UCI and display status")
+    print("  --print    Display current band configuration")
+    print("  --reset    Reset to all bands")
+    print("  --help     Show this help")
     print("")
-    print("Examples:")
-    print("  force-bands --lte 1:3:7:20 --nr5g 78")
-    print("  force-bands --reset")
-    print("  force-bands --verify")
+    print("UCI configuration (in /etc/config/quectel):")
+    print("  config modem")
+    print("    option lte_bands '1:3:7:20'")
+    print("    option nr5g_bands '78'")
 end
 
-local function parse_bands(str)
-    if not str or str == "" then return nil end
-    local bands = {}
-    for band in str:gmatch("(%d+)") do
-        table.insert(bands, tonumber(band))
-    end
-    return bands
-end
-
--- Parse arguments
-local lte_bands = nil
-local nr5g_bands = nil
-local reset = false
-local verify = false
-
-local i = 1
-while i <= #arg do
-    local a = arg[i]
-    if a == "--lte" then
-        i = i + 1
-        lte_bands = parse_bands(arg[i])
-    elseif a == "--nr5g" then
-        i = i + 1
-        nr5g_bands = parse_bands(arg[i])
-    elseif a == "--reset" then
-        reset = true
-    elseif a == "--verify" then
-        verify = true
-    elseif a == "--help" or a == "-h" then
-        print_usage()
-        os.exit(0)
-    else
-        io.stderr:write("Unknown option: " .. a .. "\n")
-        print_usage()
-        os.exit(1)
-    end
-    i = i + 1
-end
-
--- Connect to modem
-local modem = quectel.create_modem()
-local ok, err = modem:open()
-if not ok then
-    io.stderr:write("Error: " .. tostring(err) .. "\n")
-    os.exit(1)
-end
-
-if verify then
-    -- Show current configuration
+local function print_status(modem)
     print("Current band configuration:")
     print("")
 
@@ -91,15 +42,52 @@ if verify then
     else
         print(string.format("  NR5G bands: %s", nr or "?"))
     end
+end
 
+-- Parse arguments
+local action = nil
+
+for i = 1, #arg do
+    local a = arg[i]
+    if a == "--apply" then
+        action = "apply"
+    elseif a == "--print" then
+        action = "print"
+    elseif a == "--reset" then
+        action = "reset"
+    elseif a == "--help" or a == "-h" then
+        print_usage()
+        os.exit(0)
+    else
+        io.stderr:write("Unknown option: " .. a .. "\n")
+        print_usage()
+        os.exit(1)
+    end
+end
+
+-- No action = show help
+if not action then
+    print_usage()
+    os.exit(0)
+end
+
+-- Connect to modem
+local modem = quectel.create_modem()
+local ok, err = modem:open()
+if not ok then
+    io.stderr:write("Error: " .. tostring(err) .. "\n")
+    os.exit(1)
+end
+
+if action == "print" then
+    print_status(modem)
     modem:close()
     os.exit(0)
 end
 
-if reset then
+if action == "reset" then
     print("Resetting to all bands...")
 
-    -- Reset LTE bands (empty = all)
     local resp = modem:send('AT+QNWPREFCFG="lte_band"')
     if resp and resp:match("OK") then
         print("  LTE bands: reset to all")
@@ -107,7 +95,6 @@ if reset then
         io.stderr:write("  Failed to reset LTE bands\n")
     end
 
-    -- Reset NR5G bands (empty = all)
     resp = modem:send('AT+QNWPREFCFG="nsa_nr5g_band"')
     if resp and resp:match("OK") then
         print("  NR5G bands: reset to all")
@@ -115,38 +102,55 @@ if reset then
         io.stderr:write("  Failed to reset NR5G bands\n")
     end
 
+    print("")
+    print_status(modem)
     modem:close()
     os.exit(0)
 end
 
-if not lte_bands and not nr5g_bands then
-    print_usage()
-    os.exit(1)
-end
+if action == "apply" then
+    local config = quectel.load_config()
 
--- Set bands
-if lte_bands then
-    local band_str = table.concat(lte_bands, ":")
-    print(string.format("Setting LTE bands to: %s", band_str))
-
-    local resp = modem:send('AT+QNWPREFCFG="lte_band",' .. band_str)
-    if resp and resp:match("OK") then
-        print("  OK")
-    else
-        io.stderr:write("  Failed\n")
+    if not config.lte_bands and not config.nr5g_bands then
+        print("No band configuration found in UCI.")
+        print("Configure with: uci set quectel.@modem[0].lte_bands='1:3:7:20'")
+        print("                uci set quectel.@modem[0].nr5g_bands='78'")
+        print("                uci commit quectel")
+        print("")
+        print_status(modem)
+        modem:close()
+        os.exit(1)
     end
-end
 
-if nr5g_bands then
-    local band_str = table.concat(nr5g_bands, ":")
-    print(string.format("Setting NR5G bands to: %s", band_str))
+    print("Applying band configuration from UCI...")
+    print("")
 
-    local resp = modem:send('AT+QNWPREFCFG="nsa_nr5g_band",' .. band_str)
-    if resp and resp:match("OK") then
-        print("  OK")
-    else
-        io.stderr:write("  Failed\n")
+    if config.lte_bands then
+        local band_str = table.concat(config.lte_bands, ":")
+        print(string.format("  LTE bands: %s", band_str))
+
+        local resp = modem:send('AT+QNWPREFCFG="lte_band",' .. band_str)
+        if resp and resp:match("OK") then
+            print("    OK")
+        else
+            io.stderr:write("    Failed\n")
+        end
     end
-end
 
-modem:close()
+    if config.nr5g_bands then
+        local band_str = table.concat(config.nr5g_bands, ":")
+        print(string.format("  NR5G bands: %s", band_str))
+
+        local resp = modem:send('AT+QNWPREFCFG="nsa_nr5g_band",' .. band_str)
+        if resp and resp:match("OK") then
+            print("    OK")
+        else
+            io.stderr:write("    Failed\n")
+        end
+    end
+
+    print("")
+    print_status(modem)
+    modem:close()
+    os.exit(0)
+end

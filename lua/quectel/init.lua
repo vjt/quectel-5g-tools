@@ -14,13 +14,15 @@ M.display = require("quectel.display")
 M.VERSION = "1.0.0"
 
 --- Load configuration from UCI
--- @return Table with device, timeout
+-- @return Table with device, timeout, bands, etc.
 function M.load_config()
     local config = {
         device = "/dev/ttyUSB2",
         timeout = 2,
         beeps_enabled = true,
         refresh_interval = 5,
+        lte_bands = nil,   -- nil = don't change, {} = all bands
+        nr5g_bands = nil,
     }
 
     -- Try to load from UCI
@@ -31,11 +33,27 @@ function M.load_config()
         local timeout = cursor:get("quectel", "@modem[0]", "timeout")
         local beeps = cursor:get("quectel", "@modem[0]", "beeps_enabled")
         local refresh = cursor:get("quectel", "@modem[0]", "refresh_interval")
+        local lte = cursor:get("quectel", "@modem[0]", "lte_bands")
+        local nr5g = cursor:get("quectel", "@modem[0]", "nr5g_bands")
 
         if device then config.device = device end
         if timeout then config.timeout = tonumber(timeout) end
         if beeps then config.beeps_enabled = (beeps == "1") end
         if refresh then config.refresh_interval = tonumber(refresh) end
+
+        -- Parse band lists (colon-separated like "1:3:7:20")
+        if lte then
+            config.lte_bands = {}
+            for band in lte:gmatch("(%d+)") do
+                table.insert(config.lte_bands, tonumber(band))
+            end
+        end
+        if nr5g then
+            config.nr5g_bands = {}
+            for band in nr5g:gmatch("(%d+)") do
+                table.insert(config.nr5g_bands, tonumber(band))
+            end
+        end
     end
 
     return config
