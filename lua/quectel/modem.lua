@@ -67,6 +67,7 @@ function M:send(command)
     -- Read response with timeout
     local response = {}
     local start_time = os.time()
+    local poll_fds = {{fd = self.fd, events = {IN = true}}}
 
     while true do
         -- Check timeout
@@ -74,9 +75,9 @@ function M:send(command)
             break
         end
 
-        -- Use select for timeout
-        local readable = posix.poll({{fd = self.fd, events = {IN = true}}}, 100)
-        if readable and readable[1] and readable[1].revents and readable[1].revents.IN then
+        -- Use poll for timeout (returns count of ready FDs)
+        local nready = posix.poll(poll_fds, 100)
+        if nready and nready > 0 then
             local data = posix.read(self.fd, 1024)
             if data and #data > 0 then
                 table.insert(response, data)

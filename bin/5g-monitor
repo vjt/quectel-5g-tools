@@ -1,5 +1,6 @@
 #!/usr/bin/env lua
 -- 5g-monitor: Real-time TUI monitor for Quectel modems with audio feedback
+-- Uses simple ANSI escape codes instead of curses for portability
 
 package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 
@@ -7,13 +8,18 @@ local quectel = require("quectel")
 local frequency = quectel.frequency
 local thresholds = quectel.thresholds
 
--- Try to load curses
-local curses_ok, curses = pcall(require, "posix.curses")
-if not curses_ok then
-    io.stderr:write("Error: luaposix curses module required\n")
-    io.stderr:write("Install with: opkg install luaposix\n")
-    os.exit(1)
-end
+-- ANSI escape codes
+local ESC = "\027"
+local CLEAR = ESC .. "[2J"
+local HOME = ESC .. "[H"
+local BOLD = ESC .. "[1m"
+local RESET = ESC .. "[0m"
+local RED = ESC .. "[91m"
+local GREEN = ESC .. "[92m"
+local YELLOW = ESC .. "[93m"
+local BLUE = ESC .. "[94m"
+local CYAN = ESC .. "[96m"
+local WHITE = ESC .. "[97m"
 
 -- Configuration
 local config = quectel.load_config()
@@ -22,35 +28,12 @@ local beeps_enabled = config.beeps_enabled
 if beeps_enabled == nil then beeps_enabled = true end
 local running = true
 
--- Color pairs
-local COLOR_NORMAL = 1
-local COLOR_EXCELLENT = 2
-local COLOR_GOOD = 3
-local COLOR_FAIR = 4
-local COLOR_POOR = 5
-local COLOR_HEADER = 6
-local COLOR_5G = 7
-
-local function setup_colors(stdscr)
-    if curses.has_colors() then
-        curses.start_color()
-        curses.use_default_colors()
-        curses.init_pair(COLOR_NORMAL, curses.COLOR_WHITE, -1)
-        curses.init_pair(COLOR_EXCELLENT, curses.COLOR_CYAN, -1)
-        curses.init_pair(COLOR_GOOD, curses.COLOR_GREEN, -1)
-        curses.init_pair(COLOR_FAIR, curses.COLOR_YELLOW, -1)
-        curses.init_pair(COLOR_POOR, curses.COLOR_RED, -1)
-        curses.init_pair(COLOR_HEADER, curses.COLOR_BLUE, -1)
-        curses.init_pair(COLOR_5G, curses.COLOR_GREEN, -1)
-    end
-end
-
-local function quality_pair(quality)
-    if quality == thresholds.EXCELLENT then return COLOR_EXCELLENT end
-    if quality == thresholds.GOOD then return COLOR_GOOD end
-    if quality == thresholds.FAIR then return COLOR_FAIR end
-    if quality == thresholds.POOR then return COLOR_POOR end
-    return COLOR_NORMAL
+local function quality_color(quality)
+    if quality == thresholds.EXCELLENT then return CYAN end
+    if quality == thresholds.GOOD then return GREEN end
+    if quality == thresholds.FAIR then return YELLOW end
+    if quality == thresholds.POOR then return RED end
+    return WHITE
 end
 
 local function beep()
@@ -60,15 +43,16 @@ local function beep()
     end
 end
 
-local function draw_header(win, status)
-    local height, width = win:getmaxyx()
+local function format_signal(value, quality)
+    if not value then return "-" end
+    local q = quality or ""
+    if q ~= "" then
+        return string.format("%s%d%s", quality_color(quality), value, RESET)
+    end
+    return tostring(value)
+end
 
-    -- Title bar
-    win:attron(curses.A_BOLD)
-    win:mvaddstr(0, 0, "5G Monitor")
-    win:attroff(curses.A_BOLD)
-
-    -- Device and network info
+local function draw_header(status)
     local device_str = "?"
     if status.device then
         device_str = string.format("%s %s", status.device.model or "?", status.device.revision or "")
@@ -79,207 +63,131 @@ local function draw_header(win, status)
         network_str = string.format("%s (%s)", status.operator.operator or "?", status.operator.mcc_mnc or "?")
     end
 
-    win:mvaddstr(0, 15, string.format("| %s | %s", device_str, network_str))
-
-    -- Status line
     local state = "CONNECTED"
     if status.serving and status.serving.state then
         state = status.serving.state
     end
     local beep_str = beeps_enabled and "BEEP:ON" or "BEEP:OFF"
-    local status_str = string.format("| %s | %s", state, beep_str)
-    if width > #status_str + 5 then
-        win:mvaddstr(0, width - #status_str - 1, status_str)
-    end
+
+    print(string.format("%s5G Monitor%s | %s | %s | %s | %s",
+        BOLD, RESET, device_str, network_str, state, beep_str))
+    print(string.rep("-", 78))
 end
 
-local function draw_serving_cell(win, status, start_row)
-    local row = start_row
-
+local function draw_serving_cell(status)
     if not status.serving then
-        win:mvaddstr(row, 0, "No serving cell")
-        return row + 1
+        print("No serving cell")
+        return
     end
 
     local lte = status.serving.lte
     local nr = status.serving.nr5g
 
     if lte then
-        -- LTE header
-        win:attron(curses.color_pair(COLOR_HEADER))
-        win:attron(curses.A_BOLD)
-        win:mvaddstr(row, 0, string.format("[LTE - Band %s]", lte.band or "?"))
-        win:attroff(curses.A_BOLD)
-        win:attroff(curses.color_pair(COLOR_HEADER))
-
-        local enodeb = quectel.extract_enodeb(lte.cell_id) or "?"
-        win:addstr(string.format(" %s | eNodeB: %s | PCI: %s", lte.duplex or "?", enodeb, lte.pci or "?"))
-        row = row + 1
-
-        -- Signal values
         local rsrp_q = thresholds.rsrp_quality(lte.rsrp)
         local rsrq_q = thresholds.rsrq_quality(lte.rsrq)
         local sinr_q = thresholds.sinr_quality(lte.sinr)
+        local enodeb = quectel.extract_enodeb(lte.cell_id) or "?"
 
-        win:mvaddstr(row, 2, "RSRP: ")
-        win:attron(curses.color_pair(quality_pair(rsrp_q)))
-        win:addstr(string.format("%d dBm", lte.rsrp or 0))
-        win:attroff(curses.color_pair(quality_pair(rsrp_q)))
+        print(string.format("%s[LTE - Band %s]%s %s | eNodeB: %s | PCI: %s",
+            BLUE, lte.band or "?", RESET, lte.duplex or "?", enodeb, lte.pci or "?"))
 
-        win:addstr(" | RSRQ: ")
-        win:attron(curses.color_pair(quality_pair(rsrq_q)))
-        win:addstr(string.format("%d dB", lte.rsrq or 0))
-        win:attroff(curses.color_pair(quality_pair(rsrq_q)))
+        print(string.format("  RSRP: %s dBm | RSRQ: %s dB | SINR: %s dB",
+            format_signal(lte.rsrp, rsrp_q),
+            format_signal(lte.rsrq, rsrq_q),
+            format_signal(lte.sinr, sinr_q)))
 
-        win:addstr(" | SINR: ")
-        win:attron(curses.color_pair(quality_pair(sinr_q)))
-        win:addstr(string.format("%d dB", lte.sinr or 0))
-        win:attroff(curses.color_pair(quality_pair(sinr_q)))
-
-        row = row + 1
-
-        -- Frequency and bandwidth
         local freq_str = frequency.format_frequency(lte.earfcn or 0, false)
         local dl_bw = frequency.format_bandwidth(lte.bandwidth_dl_mhz)
         local ul_bw = frequency.format_bandwidth(lte.bandwidth_ul_mhz)
-        win:mvaddstr(row, 2, string.format("Freq: %s | BW: DL %s / UL %s", freq_str, dl_bw, ul_bw))
-        row = row + 1
+        print(string.format("  Freq: %s | BW: DL %s / UL %s", freq_str, dl_bw, ul_bw))
     end
 
     if nr then
-        row = row + 1
-
-        -- 5G header
-        win:attron(curses.color_pair(COLOR_5G))
-        win:attron(curses.A_BOLD)
-        win:mvaddstr(row, 0, string.format("[5G-NSA - Band n%s]", nr.band or "?"))
-        win:attroff(curses.A_BOLD)
-        win:attroff(curses.color_pair(COLOR_5G))
-        win:addstr(string.format(" PCI: %s", nr.pci or "?"))
-        row = row + 1
-
-        -- Signal values
         local rsrp_q = thresholds.rsrp_quality(nr.rsrp)
         local rsrq_q = thresholds.rsrq_quality(nr.rsrq)
         local sinr_q = thresholds.sinr_quality(nr.sinr)
 
-        win:mvaddstr(row, 2, "RSRP: ")
-        win:attron(curses.color_pair(quality_pair(rsrp_q)))
-        win:addstr(string.format("%d dBm", nr.rsrp or 0))
-        win:attroff(curses.color_pair(quality_pair(rsrp_q)))
+        print("")
+        print(string.format("%s[5G-NSA - Band n%s]%s PCI: %s",
+            GREEN, nr.band or "?", RESET, nr.pci or "?"))
 
-        win:addstr(" | RSRQ: ")
-        win:attron(curses.color_pair(quality_pair(rsrq_q)))
-        win:addstr(string.format("%d dB", nr.rsrq or 0))
-        win:attroff(curses.color_pair(quality_pair(rsrq_q)))
+        print(string.format("  RSRP: %s dBm | RSRQ: %s dB | SINR: %s dB",
+            format_signal(nr.rsrp, rsrp_q),
+            format_signal(nr.rsrq, rsrq_q),
+            format_signal(nr.sinr, sinr_q)))
 
-        win:addstr(" | SINR: ")
-        win:attron(curses.color_pair(quality_pair(sinr_q)))
-        win:addstr(string.format("%.1f dB", nr.sinr or 0))
-        win:attroff(curses.color_pair(quality_pair(sinr_q)))
-
-        row = row + 1
-
-        -- Frequency and bandwidth
         local freq_str = frequency.format_frequency(nr.arfcn or 0, true)
         local bw = frequency.format_bandwidth(nr.bandwidth_mhz)
-        win:mvaddstr(row, 2, string.format("Freq: %s | BW: %s", freq_str, bw))
-        row = row + 1
+        print(string.format("  Freq: %s | BW: %s", freq_str, bw))
     end
-
-    return row
 end
 
-local function draw_carrier_aggregation(win, status, start_row)
-    local row = start_row + 1
-
+local function draw_carrier_aggregation(status)
     if not status.ca or (not status.ca.pcc and #status.ca.scc == 0) then
-        win:mvaddstr(row, 0, "Carrier Aggregation: none")
-        return row + 1
+        print("\nCarrier Aggregation: none")
+        return
     end
 
-    win:attron(curses.A_BOLD)
-    win:mvaddstr(row, 0, "Carrier Aggregation:")
-    win:attroff(curses.A_BOLD)
-    row = row + 1
+    print(string.format("\n%sCarrier Aggregation:%s", BOLD, RESET))
 
-    local function draw_carrier(carrier)
+    local function print_carrier(carrier)
         local is_nr = carrier.rat == "nr"
         local band_name = quectel.format_band(carrier.band, is_nr)
         local rsrp_q = thresholds.rsrp_quality(carrier.rsrp)
 
-        local role_col = carrier.role == "pcc" and COLOR_HEADER or COLOR_EXCELLENT
-        win:attron(curses.color_pair(role_col))
-        win:mvaddstr(row, 2, string.format("%-3s", carrier.role:upper()))
-        win:attroff(curses.color_pair(role_col))
-
-        win:addstr(string.format(" %-8s | PCI %3s | RSRP ", band_name, carrier.pci or "-"))
-
-        win:attron(curses.color_pair(quality_pair(rsrp_q)))
-        win:addstr(string.format("%4s", carrier.rsrp or "-"))
-        win:attroff(curses.color_pair(quality_pair(rsrp_q)))
-
-        win:addstr(string.format(" | SINR %4s", carrier.sinr or "-"))
-
-        row = row + 1
+        local col = carrier.role == "pcc" and BLUE or CYAN
+        print(string.format("  %s%-3s%s %-8s | PCI %3s | RSRP %s | SINR %4s",
+            col, carrier.role:upper(), RESET,
+            band_name, carrier.pci or "-",
+            format_signal(carrier.rsrp, rsrp_q),
+            carrier.sinr or "-"))
     end
 
     if status.ca.pcc then
-        draw_carrier(status.ca.pcc)
+        print_carrier(status.ca.pcc)
     end
 
     for _, scc in ipairs(status.ca.scc) do
-        draw_carrier(scc)
+        print_carrier(scc)
     end
-
-    return row
 end
 
-local function draw_neighbours(win, status, start_row, max_rows)
-    local row = start_row + 1
+local function draw_neighbours(status, max_rows)
+    max_rows = max_rows or 5
 
     if not status.neighbours or #status.neighbours == 0 then
-        win:mvaddstr(row, 0, "Neighbour Cells: none")
-        return row + 1
+        print("\nNeighbour Cells: none")
+        return
     end
 
-    win:attron(curses.A_BOLD)
-    win:mvaddstr(row, 0, "Neighbour Cells:")
-    win:attroff(curses.A_BOLD)
-    row = row + 1
+    print(string.format("\n%sNeighbour Cells:%s", BOLD, RESET))
 
     local count = 0
     for _, nb in ipairs(status.neighbours) do
         if count >= max_rows then
-            win:mvaddstr(row, 2, string.format("... and %d more", #status.neighbours - count))
+            print(string.format("  ... and %d more", #status.neighbours - count))
             break
         end
 
         local rsrp_q = thresholds.rsrp_quality(nb.rsrp)
         local freq_str = frequency.format_frequency(nb.earfcn or 0, false)
 
-        win:mvaddstr(row, 2, string.format("%-3s %-18s | PCI %3s | RSRP ",
-            nb.rat:upper(), freq_str, nb.pci or "-"))
+        print(string.format("  %-3s %-18s | PCI %3s | RSRP %s | (%s)",
+            nb.rat:upper(), freq_str, nb.pci or "-",
+            format_signal(nb.rsrp, rsrp_q),
+            nb.scope or "?"))
 
-        win:attron(curses.color_pair(quality_pair(rsrp_q)))
-        win:addstr(string.format("%4s", nb.rsrp or "-"))
-        win:attroff(curses.color_pair(quality_pair(rsrp_q)))
-
-        win:addstr(string.format(" | (%s)", nb.scope or "?"))
-
-        row = row + 1
         count = count + 1
     end
-
-    return row
 end
 
-local function draw_help(win)
-    local height, width = win:getmaxyx()
-    win:mvaddstr(height - 1, 0, "q:quit  r:refresh  b:toggle beep  j/k:scroll")
+local function draw_help()
+    print("")
+    print("Press Ctrl+C to quit")
 end
 
-local function main_loop(stdscr, modem)
+local function main_loop(modem)
     local last_beep_time = 0
 
     while running do
@@ -289,22 +197,16 @@ local function main_loop(stdscr, modem)
             status = {}
         end
 
-        -- Clear and redraw
-        stdscr:clear()
+        -- Clear screen and move cursor home
+        io.write(CLEAR .. HOME)
 
-        draw_header(stdscr, status)
-        local row = draw_serving_cell(stdscr, status, 2)
-        row = draw_carrier_aggregation(stdscr, status, row)
+        draw_header(status)
+        draw_serving_cell(status)
+        draw_carrier_aggregation(status)
+        draw_neighbours(status, 5)
+        draw_help()
 
-        local height = stdscr:getmaxyx()
-        local max_neighbours = height - row - 3
-        if max_neighbours > 0 then
-            draw_neighbours(stdscr, status, row, max_neighbours)
-        end
-
-        draw_help(stdscr)
-
-        stdscr:refresh()
+        io.flush()
 
         -- Audio feedback based on SINR
         local sinr = nil
@@ -327,19 +229,9 @@ local function main_loop(stdscr, modem)
             end
         end
 
-        -- Handle input with timeout
-        stdscr:timeout(refresh_interval * 1000)
-        local ch = stdscr:getch()
-
-        if ch then
-            if ch == string.byte('q') or ch == string.byte('Q') then
-                running = false
-            elseif ch == string.byte('r') or ch == string.byte('R') then
-                -- Force refresh (loop continues)
-            elseif ch == string.byte('b') or ch == string.byte('B') then
-                beeps_enabled = not beeps_enabled
-            end
-        end
+        -- Sleep for refresh interval
+        -- Use os.execute with sleep since we don't have curses timeout
+        os.execute("sleep " .. refresh_interval)
     end
 end
 
@@ -368,27 +260,31 @@ while i <= #arg do
     i = i + 1
 end
 
--- Initialize curses
-local stdscr = curses.initscr()
-curses.cbreak()
-curses.echo(false)
-curses.nl(false)
-stdscr:keypad(true)
-curses.curs_set(0)  -- Hide cursor
-
-setup_colors(stdscr)
-
 -- Connect to modem
 local modem = quectel.create_modem()
 
--- Run main loop with cleanup on exit
+-- Handle Ctrl+C gracefully
+local function cleanup()
+    modem:close()
+    io.write(RESET)
+    io.flush()
+    os.exit(0)
+end
+
+-- Note: Lua doesn't have signal handling, Ctrl+C will just exit
+-- The user will see this message
+
+print("Starting 5G Monitor... (Ctrl+C to quit)")
+
+-- Run main loop
 local ok, err = pcall(function()
-    main_loop(stdscr, modem)
+    main_loop(modem)
 end)
 
 -- Cleanup
-curses.endwin()
 modem:close()
+io.write(RESET)
+io.flush()
 
 if not ok then
     io.stderr:write("Error: " .. tostring(err) .. "\n")
