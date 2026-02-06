@@ -1,0 +1,48 @@
+#!/bin/sh
+# Disable USB autosuspend for Quectel modem
+# Run this script at boot to prevent USB resets caused by power management
+#
+# Add to /etc/rc.local or create a procd init script
+
+# Find Quectel USB device and disable autosuspend
+for device in /sys/bus/usb/devices/*/manufacturer; do
+    if [ -f "$device" ] && grep -qi "quectel" "$device" 2>/dev/null; then
+        dir=$(dirname "$device")
+        power_control="$dir/power/control"
+        autosuspend="$dir/power/autosuspend"
+        autosuspend_delay="$dir/power/autosuspend_delay_ms"
+
+        echo "Found Quectel modem at: $dir"
+
+        # Disable autosuspend
+        if [ -f "$power_control" ]; then
+            echo "on" > "$power_control" 2>/dev/null && \
+                echo "  Set power/control = on"
+        fi
+
+        # Set autosuspend to -1 (disabled)
+        if [ -f "$autosuspend" ]; then
+            echo "-1" > "$autosuspend" 2>/dev/null && \
+                echo "  Set power/autosuspend = -1"
+        fi
+
+        # Set autosuspend delay to very high value
+        if [ -f "$autosuspend_delay" ]; then
+            echo "86400000" > "$autosuspend_delay" 2>/dev/null && \
+                echo "  Set power/autosuspend_delay_ms = 86400000 (24h)"
+        fi
+    fi
+done
+
+# Also check for USB hubs and disable autosuspend there
+for hub in /sys/bus/usb/devices/*/bDeviceClass; do
+    if [ -f "$hub" ] && [ "$(cat "$hub" 2>/dev/null)" = "09" ]; then
+        dir=$(dirname "$hub")
+        power_control="$dir/power/control"
+        if [ -f "$power_control" ]; then
+            echo "on" > "$power_control" 2>/dev/null
+        fi
+    fi
+done
+
+echo "Done. USB autosuspend disabled for Quectel modem."
