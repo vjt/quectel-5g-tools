@@ -139,7 +139,7 @@ function M.parse_serving_cell(text)
                 mnc = tonumber(values[4]),
                 cell_id = values[5],     -- hex string
                 pci = tonumber(values[6]),
-                earfcn = tonumber(values[7]),
+                arfcn = tonumber(values[7]),
                 band = tonumber(values[8]),
                 bandwidth_dl = tonumber(values[9]),
                 bandwidth_ul = tonumber(values[10]),
@@ -215,7 +215,7 @@ function M.parse_qcainfo(text)
 
             local carrier = {
                 role = role:lower(),
-                earfcn = parse_int(values[2]),
+                arfcn = parse_int(values[2]),
                 bandwidth_rb = parse_int(values[3]),
                 band = tonumber(band_num),
                 rat = is_nr and "5g" or "lte",
@@ -290,7 +290,7 @@ function M.parse_neighbours(text)
             local neighbour = {
                 scope = scope,
                 rat = rat:lower(),
-                earfcn = tonumber(values[3]),
+                arfcn = tonumber(values[3]),
                 pci = tonumber(values[4]),
                 rsrq = tonumber(values[5]),
                 rsrp = tonumber(values[6]),

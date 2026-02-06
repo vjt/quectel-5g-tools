@@ -68,14 +68,13 @@ local function scrape()
     end
 
     -- Secondary carriers from QCAINFO
-    -- Skip NR5G entries that duplicate serving.nr5g (same PCI and band)
-    local nr5g_pci = status.serving and status.serving.nr5g and status.serving.nr5g.pci
-    local nr5g_band = status.serving and status.serving.nr5g and status.serving.nr5g.band
+    -- Skip NR5G entries that duplicate serving.nr5g
+    local nr5g = status.serving and status.serving.nr5g
 
     if status.ca and status.ca.scc then
         for _, scc in ipairs(status.ca.scc) do
             -- Skip if this is a duplicate of the serving NR5G cell
-            local is_duplicate = (scc.rat == "5g" and scc.pci == nr5g_pci and scc.band == nr5g_band)
+            local is_duplicate = (scc.rat == "5g" and nr5g and quectel.utils.same_cell(scc, nr5g))
             if not is_duplicate then
                 table.insert(cells, {
                     role = "scc",

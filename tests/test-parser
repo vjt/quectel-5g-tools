@@ -42,7 +42,7 @@ test("SCC parsed", #result.scc == 1)
 test("SCC pci=697", result.scc[1] and result.scc[1].pci == 697)
 test("SCC band=78", result.scc[1] and result.scc[1].band == 78)
 test("SCC rat=5g", result.scc[1] and result.scc[1].rat == "5g")
-test("SCC arfcn=648768", result.scc[1] and result.scc[1].earfcn == 648768)
+test("SCC arfcn=648768", result.scc[1] and result.scc[1].arfcn == 648768)
 print("")
 
 -- Test 3: SCC with 13 fields (full LTE)

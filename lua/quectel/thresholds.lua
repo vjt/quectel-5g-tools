@@ -77,31 +77,6 @@ function M.overall_quality(rsrp, rsrq, sinr)
     return nil
 end
 
---- Calculate beep interval based on SINR
--- Higher SINR = faster beeps
--- @param sinr SINR value in dB
--- @return Interval in seconds (or nil to disable beeps)
-function M.beep_interval(sinr)
-    if not sinr then return nil end
-
-    -- Map SINR to beep interval
-    -- SINR < 0: no beeps
-    -- SINR 0-10: slow beeps (1.0 - 0.5s)
-    -- SINR 10-20: medium beeps (0.5 - 0.2s)
-    -- SINR > 20: fast beeps (0.2 - 0.1s)
-
-    if sinr < 0 then
-        return nil  -- no beeps for poor signal
-    elseif sinr < 10 then
-        return 1.0 - (sinr / 10) * 0.5  -- 1.0 to 0.5
-    elseif sinr < 20 then
-        return 0.5 - ((sinr - 10) / 10) * 0.3  -- 0.5 to 0.2
-    else
-        local interval = 0.2 - ((sinr - 20) / 20) * 0.1
-        return math.max(interval, 0.1)  -- cap at 0.1s
-    end
-end
-
 --- Calculate number of beeps based on SINR
 -- Better signal = more beeps for audio feedback while pointing antenna
 -- Matches legacy Python implementation thresholds

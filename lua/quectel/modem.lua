@@ -2,9 +2,8 @@
 -- Uses luaposix for serial I/O
 
 local posix = require("posix")
-local posix_time = require("posix.time")
 local parser = require("quectel.parser")
-local frequency = require("quectel.frequency")
+local utils = require("quectel.utils")
 
 local M = {}
 M.__index = M
@@ -14,13 +13,6 @@ local DEFAULT_DEVICE = "/dev/ttyUSB2"
 local DEFAULT_TIMEOUT = 2  -- seconds
 local LOCK_FILE = "/var/lock/quectel-modem.lock"
 local COMMAND_DELAY = 0.1  -- seconds between commands to reduce USB stress
-
---- Sleep for specified seconds using nanosleep
-local function sleep(seconds)
-    local sec = math.floor(seconds)
-    local nsec = math.floor((seconds - sec) * 1e9)
-    posix_time.nanosleep({tv_sec = sec, tv_nsec = nsec})
-end
 
 --- Acquire exclusive lock on modem using lockfile
 -- @return true on success, nil + error on failure
@@ -142,8 +134,8 @@ function M:send(command)
         return nil, "Failed to write command"
     end
 
-    -- Small delay to let modem process command (using nanosleep, not os.execute)
-    sleep(COMMAND_DELAY)
+    -- Small delay to let modem process command (using nanoutils.sleep, not os.execute)
+    utils.sleep(COMMAND_DELAY)
 
     -- Read response with timeout using non-blocking reads
     local response = {}
@@ -172,7 +164,7 @@ function M:send(command)
             if os.time() - last_read_time > 1 then
                 break
             end
-            sleep(0.05)
+            utils.sleep(0.05)
         end
     end
 
@@ -264,7 +256,6 @@ end
 --- Backfill carrier aggregation entries with serving cell data
 -- QCAINFO reports rssnr which is NOT the same as SINR from QENG="servingcell"
 -- We backfill authoritative signal data from serving cell when available
--- Match by PCI and ARFCN to identify the same cell
 -- @param status Status table with serving and ca fields
 local function backfill_from_serving(status)
     if not status.serving then return end
@@ -276,15 +267,7 @@ local function backfill_from_serving(status)
     -- Helper to backfill a single carrier from a serving cell source
     local function backfill_carrier(carrier, source)
         if not source then return end
-
-        -- Match by PCI and ARFCN/EARFCN
-        local pci_match = carrier.pci and source.pci and carrier.pci == source.pci
-        local arfcn_key = carrier.rat == "5g" and "arfcn" or "earfcn"
-        local carrier_arfcn = carrier.earfcn
-        local source_arfcn = source[arfcn_key] or source.earfcn
-        local arfcn_match = carrier_arfcn and source_arfcn and carrier_arfcn == source_arfcn
-
-        if not (pci_match or arfcn_match) then return end
+        if not utils.same_cell(carrier, source) then return end
 
         -- Backfill signal values if missing
         if not carrier.rsrp and source.rsrp then carrier.rsrp = source.rsrp end
@@ -297,7 +280,7 @@ local function backfill_from_serving(status)
         end
     end
 
-    -- Helper to process a carrier against appropriate serving cell
+    -- Process PCC and all SCCs against appropriate serving cell
     local function process_carrier(carrier)
         if carrier.rat == "5g" then
             backfill_carrier(carrier, nr)
@@ -306,12 +289,10 @@ local function backfill_from_serving(status)
         end
     end
 
-    -- Check PCC
     if status.ca.pcc then
         process_carrier(status.ca.pcc)
     end
 
-    -- Check all SCCs
     for _, scc in ipairs(status.ca.scc or {}) do
         process_carrier(scc)
     end
@@ -330,61 +311,8 @@ function M:get_status()
     status.ca = self:get_ca_info()
     status.neighbours = self:get_neighbours()
 
-    -- Enrich with frequency info
-    if status.serving and status.serving.lte then
-        local lte = status.serving.lte
-        if lte.earfcn then
-            lte.frequency_mhz = frequency.earfcn_to_mhz(lte.earfcn)
-        end
-        if lte.bandwidth_dl then
-            lte.bandwidth_dl_mhz = frequency.lte_bandwidth_mhz(lte.bandwidth_dl)
-        end
-        if lte.bandwidth_ul then
-            lte.bandwidth_ul_mhz = frequency.lte_bandwidth_mhz(lte.bandwidth_ul)
-        end
-    end
-
-    if status.serving and status.serving.nr5g then
-        local nr = status.serving.nr5g
-        if nr.arfcn then
-            nr.frequency_mhz = frequency.nrarfcn_to_mhz(nr.arfcn)
-        end
-        if nr.bandwidth then
-            nr.bandwidth_mhz = frequency.nr5g_bandwidth_mhz(nr.bandwidth)
-        end
-    end
-
-    -- Enrich CA info
-    if status.ca then
-        if status.ca.pcc then
-            local pcc = status.ca.pcc
-            if pcc.earfcn then
-                if pcc.rat == "5g" then
-                    pcc.frequency_mhz = frequency.nrarfcn_to_mhz(pcc.earfcn)
-                else
-                    pcc.frequency_mhz = frequency.earfcn_to_mhz(pcc.earfcn)
-                end
-            end
-            if pcc.bandwidth_rb then
-                pcc.bandwidth_mhz = frequency.lte_bandwidth_mhz(pcc.bandwidth_rb, true)
-            end
-        end
-        for _, scc in ipairs(status.ca.scc) do
-            if scc.earfcn then
-                if scc.rat == "5g" then
-                    scc.frequency_mhz = frequency.nrarfcn_to_mhz(scc.earfcn)
-                else
-                    scc.frequency_mhz = frequency.earfcn_to_mhz(scc.earfcn)
-                end
-            end
-            if scc.bandwidth_rb then
-                scc.bandwidth_mhz = frequency.lte_bandwidth_mhz(scc.bandwidth_rb, true)
-            end
-        end
-
-        -- Backfill SINR from serving cell (authoritative source)
-        backfill_from_serving(status)
-    end
+    utils.add_frequency_info(status)
+    backfill_from_serving(status)
 
     return status
 end
@@ -399,61 +327,8 @@ function M:get_signal_status()
     status.serving = self:get_serving_cell()
     status.ca = self:get_ca_info()
 
-    -- Enrich with frequency info
-    if status.serving and status.serving.lte then
-        local lte = status.serving.lte
-        if lte.earfcn then
-            lte.frequency_mhz = frequency.earfcn_to_mhz(lte.earfcn)
-        end
-        if lte.bandwidth_dl then
-            lte.bandwidth_dl_mhz = frequency.lte_bandwidth_mhz(lte.bandwidth_dl)
-        end
-        if lte.bandwidth_ul then
-            lte.bandwidth_ul_mhz = frequency.lte_bandwidth_mhz(lte.bandwidth_ul)
-        end
-    end
-
-    if status.serving and status.serving.nr5g then
-        local nr = status.serving.nr5g
-        if nr.arfcn then
-            nr.frequency_mhz = frequency.nrarfcn_to_mhz(nr.arfcn)
-        end
-        if nr.bandwidth then
-            nr.bandwidth_mhz = frequency.nr5g_bandwidth_mhz(nr.bandwidth)
-        end
-    end
-
-    -- Enrich CA info
-    if status.ca then
-        if status.ca.pcc then
-            local pcc = status.ca.pcc
-            if pcc.earfcn then
-                if pcc.rat == "5g" then
-                    pcc.frequency_mhz = frequency.nrarfcn_to_mhz(pcc.earfcn)
-                else
-                    pcc.frequency_mhz = frequency.earfcn_to_mhz(pcc.earfcn)
-                end
-            end
-            if pcc.bandwidth_rb then
-                pcc.bandwidth_mhz = frequency.lte_bandwidth_mhz(pcc.bandwidth_rb, true)
-            end
-        end
-        for _, scc in ipairs(status.ca.scc or {}) do
-            if scc.earfcn then
-                if scc.rat == "5g" then
-                    scc.frequency_mhz = frequency.nrarfcn_to_mhz(scc.earfcn)
-                else
-                    scc.frequency_mhz = frequency.earfcn_to_mhz(scc.earfcn)
-                end
-            end
-            if scc.bandwidth_rb then
-                scc.bandwidth_mhz = frequency.lte_bandwidth_mhz(scc.bandwidth_rb, true)
-            end
-        end
-
-        -- Backfill SINR from serving cell (authoritative source)
-        backfill_from_serving(status)
-    end
+    utils.add_frequency_info(status)
+    backfill_from_serving(status)
 
     return status
 end

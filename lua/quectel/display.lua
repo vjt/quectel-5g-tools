@@ -3,39 +3,10 @@
 
 local M = {}
 
--- Load dependencies directly (avoid circular require via quectel)
+-- Load dependencies
 local frequency = require("quectel.frequency")
 local thresholds = require("quectel.thresholds")
-
--- Utility functions (duplicated from init.lua to avoid circular dependency)
-
---- Format band string (e.g., "B1" or "n78")
-local function format_band(band, is_nr)
-    if not band then return "?" end
-    if is_nr then
-        return "n" .. band
-    else
-        return "B" .. band
-    end
-end
-
---- Extract eNodeB ID from cell ID
--- For LTE, eNodeB is upper 20 bits of 28-bit cell ID
-local function extract_enodeb(cell_id)
-    if not cell_id then return nil end
-
-    local num
-    if type(cell_id) == "string" then
-        num = tonumber(cell_id, 16)
-    else
-        num = cell_id
-    end
-
-    if not num then return nil end
-
-    -- eNodeB is bits 8-27 (upper 20 bits of 28-bit cell ID)
-    return math.floor(num / 256)
-end
+local utils = require("quectel.utils")
 
 -- ANSI escape codes
 M.ESC = "\027"
@@ -136,7 +107,7 @@ function M.print_serving_cell(status)
         local rsrp_q = thresholds.rsrp_quality(lte.rsrp)
         local rsrq_q = thresholds.rsrq_quality(lte.rsrq)
         local sinr_q = thresholds.sinr_quality(lte.sinr)
-        local enodeb = extract_enodeb(lte.cell_id) or "?"
+        local enodeb = utils.extract_enodeb(lte.cell_id) or "?"
 
         print(string.format("\n%s[LTE - Band %s]%s %s | eNodeB: %s | PCI: %s | TAC: %s",
             M.color(M.Colors.BLUE), lte.band or "?", M.color(M.Colors.RESET),
@@ -147,7 +118,7 @@ function M.print_serving_cell(status)
             M.format_signal(lte.rsrq, rsrq_q),
             M.format_signal(lte.sinr, sinr_q)))
 
-        local freq_str = frequency.format_frequency(lte.earfcn or 0, false)
+        local freq_str = frequency.format_frequency(lte.arfcn or 0, false)
         local dl_bw = frequency.format_bandwidth(lte.bandwidth_dl_mhz)
         local ul_bw = frequency.format_bandwidth(lte.bandwidth_ul_mhz)
         print(string.format("  Freq: %s | BW: DL %s / UL %s", freq_str, dl_bw, ul_bw))
@@ -190,14 +161,14 @@ function M.print_carrier_aggregation(status)
 
     local function print_carrier(carrier)
         local is_nr = carrier.rat == "5g"
-        local band_name = format_band(carrier.band, is_nr)
+        local band_name = utils.format_band(carrier.band, is_nr)
         local rsrp_q = thresholds.rsrp_quality(carrier.rsrp)
         local sinr_q = thresholds.sinr_quality(carrier.sinr)
 
         local col = carrier.role == "pcc" and M.Colors.BLUE or M.Colors.CYAN
 
         local bw = frequency.format_bandwidth(carrier.bandwidth_mhz)
-        local freq_str = frequency.format_frequency(carrier.earfcn or 0, is_nr)
+        local freq_str = frequency.format_frequency(carrier.arfcn or 0, is_nr)
         print(string.format("  %s%-3s%s %-8s | PCI %3s | RSRP %s | SINR %s | %7s | %s",
             M.color(col), carrier.role:upper(), M.color(M.Colors.RESET),
             band_name, carrier.pci or "-",
@@ -245,7 +216,7 @@ function M.print_neighbours(status, max_rows)
         end
 
         local rsrp_q = thresholds.rsrp_quality(nb.rsrp)
-        local freq_str = frequency.format_frequency(nb.earfcn or 0, false)
+        local freq_str = frequency.format_frequency(nb.arfcn or 0, false)
 
         print(string.format("  %-3s %-18s | PCI %3s | RSRP %s | (%s)",
             nb.rat:upper(), freq_str, nb.pci or "-",

@@ -7,9 +7,9 @@ package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 local quectel = require("quectel")
 local display = quectel.display
 local thresholds = quectel.thresholds
+local utils = quectel.utils
 
 -- Try to load posix modules
-local posix_time = require("posix.time")
 local posix_signal = require("posix.signal")
 
 -- Configuration
@@ -21,13 +21,6 @@ if beeps_enabled == nil then beeps_enabled = true end
 -- State
 local running = true
 local modem = nil
-
--- Sleep using posix.time.nanosleep (interruptible by signals)
-local function sleep(seconds)
-    local sec = math.floor(seconds)
-    local nsec = math.floor((seconds - sec) * 1e9)
-    posix_time.nanosleep({tv_sec = sec, tv_nsec = nsec})
-end
 
 -- Check function for interruptible operations
 local function is_running()
@@ -96,7 +89,7 @@ local function do_beeps(sinr)
 
     local num_beeps = thresholds.beep_count(sinr)
     if num_beeps and num_beeps > 0 then
-        display.beep(num_beeps, 0.6, sleep, is_running)
+        display.beep(num_beeps, 0.6, utils.sleep, is_running)
     end
 end
 
@@ -127,7 +120,7 @@ local function main_loop()
         if not running then break end
 
         -- Sleep for refresh interval (interruptible)
-        sleep(refresh_interval)
+        utils.sleep(refresh_interval)
     end
 end
 

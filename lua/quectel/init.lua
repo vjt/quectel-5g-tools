@@ -9,6 +9,7 @@ M.parser = require("quectel.parser")
 M.frequency = require("quectel.frequency")
 M.thresholds = require("quectel.thresholds")
 M.display = require("quectel.display")
+M.utils = require("quectel.utils")
 
 -- Module version
 M.VERSION = "1.0.0"
@@ -66,48 +67,9 @@ function M.create_modem()
     return M.modem.new(config.device, config.timeout)
 end
 
---- Format band string (e.g., "B1" or "n78")
--- @param band Band number
--- @param is_nr True for NR bands
--- @return Formatted string
-function M.format_band(band, is_nr)
-    if not band then return "?" end
-    if is_nr then
-        return "n" .. band
-    else
-        return "B" .. band
-    end
-end
-
---- Format cell ID as hex
--- @param cell_id Cell ID (may be hex string already)
--- @return Hex string
-function M.format_cell_id(cell_id)
-    if not cell_id then return "?" end
-    if type(cell_id) == "number" then
-        return string.format("%X", cell_id)
-    end
-    return cell_id
-end
-
---- Extract eNodeB ID from cell ID
--- For LTE, eNodeB is upper 20 bits of 28-bit cell ID
--- @param cell_id Cell ID (hex string or number)
--- @return eNodeB ID as number
-function M.extract_enodeb(cell_id)
-    if not cell_id then return nil end
-
-    local num
-    if type(cell_id) == "string" then
-        num = tonumber(cell_id, 16)
-    else
-        num = cell_id
-    end
-
-    if not num then return nil end
-
-    -- eNodeB is bits 8-27 (upper 20 bits of 28-bit cell ID)
-    return math.floor(num / 256)
-end
+-- Re-export common utility functions for convenience
+M.format_band = M.utils.format_band
+M.format_cell_id = M.utils.format_cell_id
+M.extract_enodeb = M.utils.extract_enodeb
 
 return M
