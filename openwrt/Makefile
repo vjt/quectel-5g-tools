@@ -9,18 +9,18 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
-PKG_VERSION:=0.1.0
+PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 
 PKG_SOURCE_PROTO:=git
-PKG_SOURCE_URL:=https://github.com/yourusername/quectel-5g-tools.git
+PKG_SOURCE_URL:=https://github.com/vjt/quectel-5g-tools.git
 PKG_SOURCE_VERSION:=HEAD
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 
 PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE
-PKG_MAINTAINER:=Your Name <you@example.com>
+PKG_MAINTAINER:=Marcello Barnaba <mbarnaba@meta.com>
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -28,28 +28,33 @@ define Package/quectel-5g-tools
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Quectel 5G Modem Tools
-  DEPENDS:=+python3 +python3-curses +python3-pyserial
-  URL:=https://github.com/yourusername/quectel-5g-tools
+  DEPENDS:=+lua +luaposix
+  URL:=https://github.com/vjt/quectel-5g-tools
 endef
 
 define Package/quectel-5g-tools/description
-  A collection of tools for monitoring and configuring Quectel 5G modems.
+  A collection of Lua tools for monitoring and configuring Quectel 5G modems.
+  Designed for GL.iNET routers with Quectel RM520N-GL modems.
   Includes:
     - 5g-info: CLI tool for displaying modem information
-    - 5g-monitor: Real-time TUI monitor with signal quality display
-    - 5g-http.cgi: CGI script for JSON API
+    - 5g-monitor: Real-time TUI monitor with signal quality display and beeps
     - at: Simple AT command wrapper
     - force-bands: Band locking utility
+    - Prometheus collector for prometheus-node-exporter-lua
 endef
 
 define Build/Compile
-	# Nothing to compile, pure Python
+	# Nothing to compile, pure Lua
 endef
 
 define Package/quectel-5g-tools/install
-	# Install Python library
-	$(INSTALL_DIR) $(1)/usr/lib/python3/quectel
-	$(INSTALL_DATA) $(PKG_BUILD_DIR)/src/quectel/*.py $(1)/usr/lib/python3/quectel/
+	# Install Lua library
+	$(INSTALL_DIR) $(1)/usr/lib/lua/quectel
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/lua/quectel/*.lua $(1)/usr/lib/lua/quectel/
+
+	# Install Prometheus collector
+	$(INSTALL_DIR) $(1)/usr/lib/lua/prometheus-collectors
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/lua/prometheus-collectors/quectel.lua $(1)/usr/lib/lua/prometheus-collectors/
 
 	# Install binaries
 	$(INSTALL_DIR) $(1)/usr/bin
@@ -57,14 +62,7 @@ define Package/quectel-5g-tools/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-monitor $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/at $(1)/usr/bin/quectel-at
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/force-bands $(1)/usr/bin/
-
-	# Install CGI script
-	$(INSTALL_DIR) $(1)/www/cgi-bin
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-http.cgi $(1)/www/cgi-bin/
-
-	# Install default config
-	$(INSTALL_DIR) $(1)/etc/quectel
-	$(INSTALL_CONF) $(PKG_BUILD_DIR)/config/quectel.toml $(1)/etc/quectel/config.toml
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/modem-debug $(1)/usr/bin/
 
 	# Install UCI config
 	$(INSTALL_DIR) $(1)/etc/config
@@ -72,7 +70,6 @@ define Package/quectel-5g-tools/install
 endef
 
 define Package/quectel-5g-tools/conffiles
-/etc/quectel/config.toml
 /etc/config/quectel
 endef
 
