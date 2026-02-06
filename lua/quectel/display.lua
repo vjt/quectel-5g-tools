@@ -189,7 +189,7 @@ function M.print_carrier_aggregation(status)
     print(string.format("\n%sCarrier Aggregation:%s", M.color(M.Colors.BOLD), M.color(M.Colors.RESET)))
 
     local function print_carrier(carrier)
-        local is_nr = carrier.rat == "nr"
+        local is_nr = carrier.rat == "5g"
         local band_name = format_band(carrier.band, is_nr)
         local rsrp_q = thresholds.rsrp_quality(carrier.rsrp)
         local sinr_q = thresholds.sinr_quality(carrier.sinr)

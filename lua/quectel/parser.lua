@@ -216,7 +216,7 @@ function M.parse_qcainfo(text)
                 earfcn = parse_int(values[2]),
                 bandwidth_rb = parse_int(values[3]),
                 band = tonumber(band_num),
-                rat = is_nr and "nr" or "lte",
+                rat = is_nr and "5g" or "lte",
             }
 
             if role == "PCC" then

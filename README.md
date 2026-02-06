@@ -45,7 +45,7 @@ Hear it beep!
 cp -r lua/quectel /usr/lib/lua/
 
 # Install CLI tools
-cp bin/* /usr/bin/
+cp bin/5g-info bin/5g-monitor bin/at bin/force-bands /usr/bin/
 
 # Install Prometheus collector (optional)
 cp lua/prometheus-collectors/quectel.lua /usr/lib/lua/prometheus-collectors/
@@ -69,7 +69,7 @@ Display modem information:
 
 ### 5g-monitor
 
-Real-time monitoring with ncurses TUI:
+Real-time monitoring with ANSI TUI:
 
 ```bash
 5g-monitor                 # Start monitor
@@ -77,17 +77,26 @@ Real-time monitoring with ncurses TUI:
 5g-monitor --no-beep       # Disable audio feedback
 ```
 
-Keyboard controls:
-- `q` - Quit
-- `r` - Refresh now
-- `b` - Toggle beeps
+Press Ctrl+C to quit.
 
 ### Band locking
 
+Configure bands in UCI:
+
 ```bash
-force-bands --lte 1:3:7:20 --nr5g 78    # Lock to specific bands
-force-bands --verify                     # Show current config
-force-bands --reset                      # Reset to all bands
+uci add_list quectel.modem.lte_bands='1'
+uci add_list quectel.modem.lte_bands='3'
+uci add_list quectel.modem.nr5g_bands='78'
+uci commit quectel
+```
+
+Then apply:
+
+```bash
+force-bands --apply        # Apply bands from UCI config
+force-bands --print        # Show current band config
+force-bands --reset        # Reset to all bands
+force-bands --wait=30 --apply  # Wait 30s then apply (for boot scripts)
 ```
 
 ### AT commands
@@ -106,14 +115,18 @@ Exported metrics:
 
 | Metric | Labels | Description |
 |--------|--------|-------------|
-| modem_info | model, revision, imei, operator, mcc_mnc | Static modem info (always 1) |
-| modem_cell_state | role, rat, band, pci, enodeb, cell_id | Connected cells (1=active) |
-| modem_signal_rsrp_dbm | role, rat, band, pci | Signal strength |
-| modem_signal_rsrq_db | role, rat, band, pci | Signal quality |
-| modem_signal_sinr_db | role, rat, band, pci | SINR |
-| modem_frequency_mhz | role, rat, band, pci | Carrier frequency |
-| modem_bandwidth_mhz | role, rat, band, pci, direction | Bandwidth |
-| modem_neighbour_rsrp_dbm | rat, band, pci, earfcn | Neighbour cell signals |
+| modem_cell_state | role, technology, band, pci, enodeb, cell_id | Connected cells (1=active) |
+| modem_signal_rsrp_dbm | role, technology, band, pci | Signal strength |
+| modem_signal_rsrq_db | role, technology, band, pci | Signal quality |
+| modem_signal_sinr_db | role, technology, band, pci | SINR |
+| modem_frequency_mhz | role, technology, band, pci | Carrier frequency |
+| modem_bandwidth_mhz | role, technology, band, pci, direction | Bandwidth |
+
+Label values:
+- `role`: `pcc` (primary), `scc` (secondary), `nsa` (5G non-standalone)
+- `technology`: `lte` or `5g`
+- `band`: e.g., `B1`, `B3`, `n78`
+- `direction`: `dl` (downlink) or `ul` (uplink)
 
 ## Configuration
 
@@ -143,30 +156,34 @@ config modem 'modem'
 ## Project Structure
 
 ```
-quectel-5g-tools/
+gl-x3000/
 ├── lua/
 │   ├── quectel/                    # Core Lua library
-│   │   ├── init.lua                # Main API
+│   │   ├── init.lua                # Main API and config loading
 │   │   ├── modem.lua               # Serial communication
 │   │   ├── parser.lua              # AT response parsing
-│   │   ├── frequency.lua           # EARFCN conversion
-│   │   └── thresholds.lua          # Signal quality
+│   │   ├── display.lua             # Terminal output formatting
+│   │   ├── frequency.lua           # EARFCN/ARFCN to MHz conversion
+│   │   └── thresholds.lua          # Signal quality thresholds
 │   └── prometheus-collectors/
 │       └── quectel.lua             # Prometheus exporter
 ├── bin/                            # CLI tools
-│   ├── 5g-info
-│   ├── 5g-monitor
-│   ├── at
-│   └── force-bands
+│   ├── 5g-info                     # One-shot info display
+│   ├── 5g-monitor                  # Real-time TUI monitor
+│   ├── at                          # AT command wrapper
+│   ├── force-bands                 # Band locking utility
+│   └── modem-debug                 # Debug info collection
+├── tests/                          # Test scripts
 ├── config/
-│   └── quectel.uci                 # UCI config
+│   └── quectel.uci                 # UCI config template
 ├── doc/                            # Screenshots
+├── openwrt/                        # OpenWRT package Makefile
 └── legacy/                         # Python implementation (archived)
 ```
 
 ## Dependencies
 
-- **luaposix**: Required for serial I/O and ncurses TUI
+- **luaposix**: Required for serial I/O
 - **prometheus-node-exporter-lua**: Optional, for Prometheus metrics
 
 ## License

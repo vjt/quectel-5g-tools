@@ -75,11 +75,11 @@ local function scrape()
     if status.ca and status.ca.scc then
         for _, scc in ipairs(status.ca.scc) do
             -- Skip if this is a duplicate of the serving NR5G cell
-            local is_duplicate = (scc.rat == "nr" and scc.pci == nr5g_pci and scc.band == nr5g_band)
+            local is_duplicate = (scc.rat == "5g" and scc.pci == nr5g_pci and scc.band == nr5g_band)
             if not is_duplicate then
                 table.insert(cells, {
                     role = "scc",
-                    technology = scc.rat == "nr" and "5g" or "lte",
+                    technology = scc.rat,
                     band = scc.band,
                     pci = scc.pci,
                     enodeb = 0,

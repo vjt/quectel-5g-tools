@@ -274,7 +274,7 @@ local function backfill_nr5g_from_serving(status)
 
     -- Helper to backfill a single carrier
     local function backfill_carrier(carrier)
-        if carrier.rat ~= "nr" then return end
+        if carrier.rat ~= "5g" then return end
 
         -- Match by PCI or ARFCN
         local pci_match = carrier.pci and nr.pci and carrier.pci == nr.pci
@@ -345,7 +345,7 @@ function M:get_status()
         if status.ca.pcc then
             local pcc = status.ca.pcc
             if pcc.earfcn then
-                if pcc.rat == "nr" then
+                if pcc.rat == "5g" then
                     pcc.frequency_mhz = frequency.nrarfcn_to_mhz(pcc.earfcn)
                 else
                     pcc.frequency_mhz = frequency.earfcn_to_mhz(pcc.earfcn)
@@ -357,7 +357,7 @@ function M:get_status()
         end
         for _, scc in ipairs(status.ca.scc) do
             if scc.earfcn then
-                if scc.rat == "nr" then
+                if scc.rat == "5g" then
                     scc.frequency_mhz = frequency.nrarfcn_to_mhz(scc.earfcn)
                 else
                     scc.frequency_mhz = frequency.earfcn_to_mhz(scc.earfcn)
@@ -414,7 +414,7 @@ function M:get_signal_status()
         if status.ca.pcc then
             local pcc = status.ca.pcc
             if pcc.earfcn then
-                if pcc.rat == "nr" then
+                if pcc.rat == "5g" then
                     pcc.frequency_mhz = frequency.nrarfcn_to_mhz(pcc.earfcn)
                 else
                     pcc.frequency_mhz = frequency.earfcn_to_mhz(pcc.earfcn)
@@ -426,7 +426,7 @@ function M:get_signal_status()
         end
         for _, scc in ipairs(status.ca.scc or {}) do
             if scc.earfcn then
-                if scc.rat == "nr" then
+                if scc.rat == "5g" then
                     scc.frequency_mhz = frequency.nrarfcn_to_mhz(scc.earfcn)
                 else
                     scc.frequency_mhz = frequency.earfcn_to_mhz(scc.earfcn)
