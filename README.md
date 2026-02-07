@@ -40,6 +40,8 @@ Hear it beep!
 
 ## Installation
 
+### On the router
+
 ```bash
 # Install Lua library
 cp -r lua/quectel /usr/lib/lua/
@@ -53,6 +55,16 @@ cp lua/prometheus-collectors/quectel.lua /usr/lib/lua/prometheus-collectors/
 # Install UCI config
 cp config/quectel.uci /etc/config/quectel
 ```
+
+### From source checkout
+
+To run the tools directly from a git clone, symlink the Lua module so it can be found by the interpreter:
+
+```bash
+ln -s "$PWD/lua/quectel" /usr/lib/lua/quectel
+```
+
+Then run the binaries directly (e.g. `./bin/5g-info`).
 
 ## Usage
 
