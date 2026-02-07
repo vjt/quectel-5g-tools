@@ -10,7 +10,7 @@ Originally developed for the GL.INET X-3000 with Quectel RM520N-GL modem and Poy
 - **5g-monitor**: Real-time TUI monitor with color-coded signal quality and audio feedback
 - **Prometheus exporter**: Metrics for Grafana dashboards
 - **at**: Simple AT command wrapper
-- **force-bands**: Utility to lock modem to specific bands
+- **5g-lock**: Band and cell locking utility
 
 ## Quick Start
 
@@ -45,7 +45,7 @@ Hear it beep!
 cp -r lua/quectel /usr/lib/lua/
 
 # Install CLI tools
-cp bin/5g-info bin/5g-monitor bin/at bin/force-bands /usr/bin/
+cp bin/5g-info bin/5g-monitor bin/at bin/5g-lock /usr/bin/
 
 # Install Prometheus collector (optional)
 cp lua/prometheus-collectors/quectel.lua /usr/lib/lua/prometheus-collectors/
@@ -79,7 +79,7 @@ Real-time monitoring with ANSI TUI:
 
 Press Ctrl+C to quit.
 
-### Band locking
+### Band and cell locking
 
 Configure bands in UCI:
 
@@ -90,13 +90,21 @@ uci add_list quectel.modem.nr5g_bands='78'
 uci commit quectel
 ```
 
+Configure cell locks (optional, does not persist across reboots):
+
+```bash
+uci add_list quectel.modem.lte_cells='275,280'       # earfcn,pci
+uci add_list quectel.modem.nr5g_cells='920,648768,15,78'  # pci,arfcn,scs,band
+uci commit quectel
+```
+
 Then apply:
 
 ```bash
-force-bands --apply        # Apply bands from UCI config
-force-bands --print        # Show current band config
-force-bands --reset        # Reset to all bands
-force-bands --wait=30 --apply  # Wait 30s then apply (for boot scripts)
+5g-lock                    # Show current lock status
+5g-lock --apply            # Apply bands and cell locks from UCI config
+5g-lock --reset            # Clear all band and cell locks
+5g-lock --wait=30 --apply  # Wait 30s then apply (for boot scripts)
 ```
 
 ### AT commands
@@ -143,6 +151,9 @@ config modem 'modem'
     list lte_bands '7'
     list lte_bands '20'
     list nr5g_bands '78'
+    # Cell locks (optional, do not persist across reboots)
+    # list lte_cells '275,280'            # earfcn,pci
+    # list nr5g_cells '920,648768,15,78'  # pci,arfcn,scs,band
 ```
 
 ## Signal Quality Thresholds
@@ -171,7 +182,7 @@ gl-x3000/
 │   ├── 5g-info                     # One-shot info display
 │   ├── 5g-monitor                  # Real-time TUI monitor
 │   ├── at                          # AT command wrapper
-│   ├── force-bands                 # Band locking utility
+│   ├── 5g-lock                      # Band and cell locking utility
 │   └── modem-debug                 # Debug info collection
 ├── tests/                          # Test scripts
 ├── config/

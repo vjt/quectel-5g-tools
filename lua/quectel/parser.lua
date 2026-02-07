@@ -326,4 +326,48 @@ function M.parse_qnwprefcfg(text)
     return nil, nil
 end
 
+--- Parse +QNWLOCK response for cell lock status
+-- @param text AT+QNWLOCK="common/4g" or "common/5g" response
+-- @return Table with type, num_cells, cells list; or nil if not parseable
+--
+-- 4G format: +QNWLOCK: "common/4g",<num>[,<earfcn>,<pci>,...]
+-- 5G format: +QNWLOCK: "common/5g",<num>[,<pci>,<arfcn>,<scs>,<band>,...]
+function M.parse_qnwlock(text)
+    for values in M.parse_response(text, "+QNWLOCK") do
+        local lock_type = values[1]  -- "common/4g" or "common/5g"
+
+        if lock_type == "common/4g" then
+            local num_cells = tonumber(values[2]) or 0
+            local cells = {}
+            -- Pairs of earfcn,pci starting at index 3
+            local i = 3
+            while i + 1 <= #values do
+                table.insert(cells, {
+                    earfcn = tonumber(values[i]),
+                    pci = tonumber(values[i + 1]),
+                })
+                i = i + 2
+            end
+            return { type = "4g", num_cells = num_cells, cells = cells }
+
+        elseif lock_type == "common/5g" then
+            local num_cells = tonumber(values[2]) or 0
+            local cells = {}
+            -- Groups of pci,arfcn,scs,band starting at index 3
+            local i = 3
+            while i + 3 <= #values do
+                table.insert(cells, {
+                    pci = tonumber(values[i]),
+                    arfcn = tonumber(values[i + 1]),
+                    scs = tonumber(values[i + 2]),
+                    band = tonumber(values[i + 3]),
+                })
+                i = i + 4
+            end
+            return { type = "5g", num_cells = num_cells, cells = cells }
+        end
+    end
+    return nil
+end
+
 return M

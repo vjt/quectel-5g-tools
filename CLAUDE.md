@@ -13,7 +13,7 @@ The goal is to extract signal information from the modem to aid accurate pointin
 - `bin/5g-info` - CLI tool for displaying modem info (table/JSON output)
 - `bin/5g-monitor` - ncurses TUI with color-coded signals and beep feedback
 - `bin/at` - Simple AT command wrapper
-- `bin/force-bands` - Band locking utility
+- `bin/5g-lock` - Band and cell locking utility
 
 See `README.md` for usage documentation.
 
@@ -44,6 +44,9 @@ config modem 'modem'
     list lte_bands '7'
     list lte_bands '20'
     list nr5g_bands '78'
+    # Cell locks (earfcn,pci for LTE; pci,arfcn,scs,band for 5G)
+    # list lte_cells '275,280'
+    # list nr5g_cells '920,648768,15,78'
 ```
 
 ## Sample AT Command Outputs

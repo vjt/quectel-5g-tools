@@ -1,0 +1,255 @@
+#!/usr/bin/env lua
+-- 5g-lock: Lock Quectel modem to specific bands and cells from UCI config
+
+package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
+
+local quectel = require("quectel")
+local posix_time = require("posix.time")
+
+local function sleep(seconds)
+    local sec = math.floor(seconds)
+    local nsec = math.floor((seconds - sec) * 1e9)
+    posix_time.nanosleep({tv_sec = sec, tv_nsec = nsec})
+end
+
+local function print_usage()
+    print("Usage: 5g-lock [OPTION]")
+    print("")
+    print("Lock Quectel modem to bands and cells configured in UCI.")
+    print("")
+    print("Options:")
+    print("  --apply       Apply band and cell lock configuration from UCI")
+    print("  --reset       Clear all band and cell locks")
+    print("  --wait=SECS   Wait SECS seconds before applying (use with --apply)")
+    print("  --help        Show this help")
+    print("")
+    print("With no options, shows current lock status.")
+    print("")
+    print("UCI configuration (in /etc/config/quectel):")
+    print("  config modem 'modem'")
+    print("    list lte_bands '1'")
+    print("    list lte_bands '3'")
+    print("    list nr5g_bands '78'")
+    print("    list lte_cells '275,280'        # earfcn,pci")
+    print("    list nr5g_cells '920,648768,15,78'  # pci,arfcn,scs,band")
+    print("")
+    print("Note: Band locks persist across reboots. Cell locks do NOT.")
+end
+
+local function print_band_status(modem)
+    local mode = modem:get_band_config("mode_pref")
+    print(string.format("  Mode: %s", mode or "?"))
+
+    local lte = modem:get_band_config("lte_band")
+    if type(lte) == "table" then
+        print(string.format("  LTE bands: %s", table.concat(lte, ":")))
+    else
+        print(string.format("  LTE bands: %s", lte or "?"))
+    end
+
+    local nr = modem:get_band_config("nsa_nr5g_band")
+    if type(nr) == "table" then
+        print(string.format("  5G NR bands: %s", table.concat(nr, ":")))
+    else
+        print(string.format("  5G NR bands: %s", nr or "?"))
+    end
+end
+
+local function print_cell_lock_status(modem)
+    local lte_lock = modem:get_cell_lock("common/4g")
+    if lte_lock and lte_lock.num_cells > 0 then
+        local parts = {}
+        for _, cell in ipairs(lte_lock.cells) do
+            table.insert(parts, string.format("EARFCN %d PCI %d", cell.earfcn, cell.pci))
+        end
+        print(string.format("  LTE cell lock: %s", table.concat(parts, ", ")))
+    else
+        print("  LTE cell lock: none")
+    end
+
+    local nr_lock = modem:get_cell_lock("common/5g")
+    if nr_lock and nr_lock.num_cells > 0 then
+        local parts = {}
+        for _, cell in ipairs(nr_lock.cells) do
+            table.insert(parts, string.format("PCI %d ARFCN %d SCS %d Band %d",
+                cell.pci, cell.arfcn, cell.scs, cell.band))
+        end
+        print(string.format("  5G NR cell lock: %s", table.concat(parts, ", ")))
+    else
+        print("  5G NR cell lock: none")
+    end
+end
+
+local function print_status(modem)
+    print("Current lock status:")
+    print("")
+    print_band_status(modem)
+    print("")
+    print_cell_lock_status(modem)
+end
+
+-- Parse arguments
+local action = "status"
+local wait_seconds = 0
+
+for i = 1, #arg do
+    local a = arg[i]
+    if a == "--apply" then
+        action = "apply"
+    elseif a == "--reset" then
+        action = "reset"
+    elseif a:match("^--wait=") then
+        wait_seconds = tonumber(a:match("^--wait=(%d+)")) or 0
+    elseif a == "--help" or a == "-h" then
+        print_usage()
+        os.exit(0)
+    else
+        io.stderr:write("Unknown option: " .. a .. "\n")
+        print_usage()
+        os.exit(1)
+    end
+end
+
+-- Connect to modem
+local modem = quectel.create_modem()
+local ok, err = modem:open()
+if not ok then
+    io.stderr:write("Error: " .. tostring(err) .. "\n")
+    os.exit(1)
+end
+
+if action == "status" then
+    print_status(modem)
+    modem:close()
+    os.exit(0)
+end
+
+if action == "reset" then
+    print("Resetting all locks...")
+    print("")
+
+    -- Reset bands
+    local resp = modem:send('AT+QNWPREFCFG="lte_band"')
+    if resp and resp:match("OK") then
+        print("  LTE bands: reset to all")
+    else
+        io.stderr:write("  Failed to reset LTE bands\n")
+    end
+
+    resp = modem:send('AT+QNWPREFCFG="nsa_nr5g_band"')
+    if resp and resp:match("OK") then
+        print("  5G NR bands: reset to all")
+    else
+        io.stderr:write("  Failed to reset 5G NR bands\n")
+    end
+
+    -- Clear cell locks
+    if modem:clear_cell_lock("common/4g") then
+        print("  LTE cell lock: cleared")
+    else
+        io.stderr:write("  Failed to clear LTE cell lock\n")
+    end
+
+    if modem:clear_cell_lock("common/5g") then
+        print("  5G NR cell lock: cleared")
+    else
+        io.stderr:write("  Failed to clear 5G NR cell lock\n")
+    end
+
+    print("")
+    print_status(modem)
+    modem:close()
+    os.exit(0)
+end
+
+if action == "apply" then
+    -- Wait if requested
+    if wait_seconds > 0 then
+        print(string.format("Waiting for %d seconds...", wait_seconds))
+        sleep(wait_seconds)
+    end
+
+    local config = quectel.load_config()
+
+    local has_bands = config.lte_bands or config.nr5g_bands
+    local has_cells = (config.lte_cells and #config.lte_cells > 0) or
+                      (config.nr5g_cells and #config.nr5g_cells > 0)
+
+    if not has_bands and not has_cells then
+        print("No lock configuration found in UCI.")
+        print("")
+        print("Configure bands:")
+        print("  uci add_list quectel.modem.lte_bands='1'")
+        print("  uci add_list quectel.modem.nr5g_bands='78'")
+        print("")
+        print("Configure cell locks:")
+        print("  uci add_list quectel.modem.lte_cells='275,280'")
+        print("  uci add_list quectel.modem.nr5g_cells='920,648768,15,78'")
+        print("")
+        print("  uci commit quectel")
+        print("")
+        print_status(modem)
+        modem:close()
+        os.exit(1)
+    end
+
+    print("Applying lock configuration from UCI...")
+    print("")
+
+    -- Apply band locks
+    if config.lte_bands then
+        local band_str = table.concat(config.lte_bands, ":")
+        print(string.format("  LTE bands: %s", band_str))
+
+        local resp = modem:send('AT+QNWPREFCFG="lte_band",' .. band_str)
+        if resp and resp:match("OK") then
+            print("    OK")
+        else
+            io.stderr:write("    Failed\n")
+        end
+    end
+
+    if config.nr5g_bands then
+        local band_str = table.concat(config.nr5g_bands, ":")
+        print(string.format("  5G NR bands: %s", band_str))
+
+        local resp = modem:send('AT+QNWPREFCFG="nsa_nr5g_band",' .. band_str)
+        if resp and resp:match("OK") then
+            print("    OK")
+        else
+            io.stderr:write("    Failed\n")
+        end
+    end
+
+    -- Apply cell locks
+    if config.lte_cells and #config.lte_cells > 0 then
+        local parts = {}
+        for _, cell in ipairs(config.lte_cells) do
+            table.insert(parts, string.format("EARFCN %d PCI %d", cell.earfcn, cell.pci))
+        end
+        print(string.format("  LTE cell lock: %s", table.concat(parts, ", ")))
+
+        if modem:set_cell_lock_4g(config.lte_cells) then
+            print("    OK")
+        else
+            io.stderr:write("    Failed\n")
+        end
+    end
+
+    if config.nr5g_cells and #config.nr5g_cells > 0 then
+        local cell = config.nr5g_cells[1]
+        print(string.format("  5G NR cell lock: PCI %d ARFCN %d SCS %d Band %d",
+            cell.pci, cell.arfcn, cell.scs, cell.band))
+
+        if modem:set_cell_lock_5g(config.nr5g_cells) then
+            print("    OK")
+        else
+            io.stderr:write("    Failed\n")
+        end
+    end
+
+    print("")
+    print_status(modem)
+    modem:close()
+    os.exit(0)
+end

@@ -253,6 +253,63 @@ function M:set_bands(setting, bands)
     return resp:match("OK") ~= nil
 end
 
+--- Get cell lock status
+-- @param lock_type "common/4g" or "common/5g"
+-- @return Parsed lock info table, or nil + error
+function M:get_cell_lock(lock_type)
+    local resp, err = self:send('AT+QNWLOCK="' .. lock_type .. '"')
+    if not resp then return nil, err end
+    return parser.parse_qnwlock(resp)
+end
+
+--- Set 4G cell lock
+-- @param cells Table of {earfcn=N, pci=N} pairs, or empty table to clear
+-- @return true on success, nil + error on failure
+function M:set_cell_lock_4g(cells)
+    local cmd
+    if not cells or #cells == 0 then
+        cmd = 'AT+QNWLOCK="common/4g",0'
+    else
+        local parts = { string.format('AT+QNWLOCK="common/4g",%d', #cells) }
+        for _, cell in ipairs(cells) do
+            table.insert(parts, string.format(",%d,%d", cell.earfcn, cell.pci))
+        end
+        cmd = table.concat(parts)
+    end
+
+    local resp, err = self:send(cmd)
+    if not resp then return nil, err end
+    return resp:match("OK") ~= nil
+end
+
+--- Set 5G NR cell lock
+-- @param cells Table of {pci=N, arfcn=N, scs=N, band=N}, or empty table to clear
+-- @return true on success, nil + error on failure
+function M:set_cell_lock_5g(cells)
+    local cmd
+    if not cells or #cells == 0 then
+        cmd = 'AT+QNWLOCK="common/5g",0'
+    else
+        -- 5G lock supports one cell at a time
+        local cell = cells[1]
+        cmd = string.format('AT+QNWLOCK="common/5g",%d,%d,%d,%d',
+            cell.pci, cell.arfcn, cell.scs, cell.band)
+    end
+
+    local resp, err = self:send(cmd)
+    if not resp then return nil, err end
+    return resp:match("OK") ~= nil
+end
+
+--- Clear cell lock
+-- @param lock_type "common/4g" or "common/5g"
+-- @return true on success, nil + error on failure
+function M:clear_cell_lock(lock_type)
+    local resp, err = self:send('AT+QNWLOCK="' .. lock_type .. '",0')
+    if not resp then return nil, err end
+    return resp:match("OK") ~= nil
+end
+
 --- Backfill carrier aggregation entries with serving cell data
 -- QCAINFO reports rssnr which is NOT the same as SINR from QENG="servingcell"
 -- We backfill authoritative signal data from serving cell when available

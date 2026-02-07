@@ -1,0 +1,102 @@
+#!/usr/bin/env lua
+-- Test script for the QNWLOCK parser
+-- Verifies correct parsing of cell lock query responses
+
+package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;lua/?.lua;lua/?/init.lua;" .. package.path
+
+local parser = require("quectel.parser")
+
+local passed = 0
+local failed = 0
+
+local function test(name, condition)
+    if condition then
+        print(string.format("  [OK] %s", name))
+        passed = passed + 1
+    else
+        print(string.format("  [FAIL] %s", name))
+        failed = failed + 1
+    end
+end
+
+print("=== Testing QNWLOCK Parser ===")
+print("")
+
+-- Test 1: 4G cell lock with 2 cells
+print("Test 1: 4G cell lock with 2 cells")
+local sample_4g = '+QNWLOCK: "common/4g",2,275,280,1350,427\n\nOK'
+local result = parser.parse_qnwlock(sample_4g)
+test("result parsed", result ~= nil)
+test("type=4g", result and result.type == "4g")
+test("num_cells=2", result and result.num_cells == 2)
+test("2 cells", result and #result.cells == 2)
+test("cell1 earfcn=275", result and result.cells[1] and result.cells[1].earfcn == 275)
+test("cell1 pci=280", result and result.cells[1] and result.cells[1].pci == 280)
+test("cell2 earfcn=1350", result and result.cells[2] and result.cells[2].earfcn == 1350)
+test("cell2 pci=427", result and result.cells[2] and result.cells[2].pci == 427)
+print("")
+
+-- Test 2: 4G cell lock with 0 cells (no lock)
+print("Test 2: 4G no cell lock")
+local sample_4g_none = '+QNWLOCK: "common/4g",0\n\nOK'
+result = parser.parse_qnwlock(sample_4g_none)
+test("result parsed", result ~= nil)
+test("type=4g", result and result.type == "4g")
+test("num_cells=0", result and result.num_cells == 0)
+test("0 cells", result and #result.cells == 0)
+print("")
+
+-- Test 3: 4G cell lock with 1 cell
+print("Test 3: 4G single cell lock")
+local sample_4g_one = '+QNWLOCK: "common/4g",1,275,280\n\nOK'
+result = parser.parse_qnwlock(sample_4g_one)
+test("result parsed", result ~= nil)
+test("num_cells=1", result and result.num_cells == 1)
+test("1 cell", result and #result.cells == 1)
+test("earfcn=275", result and result.cells[1] and result.cells[1].earfcn == 275)
+test("pci=280", result and result.cells[1] and result.cells[1].pci == 280)
+print("")
+
+-- Test 4: 5G cell lock
+print("Test 4: 5G cell lock")
+local sample_5g = '+QNWLOCK: "common/5g",1,920,648768,15,78\n\nOK'
+result = parser.parse_qnwlock(sample_5g)
+test("result parsed", result ~= nil)
+test("type=5g", result and result.type == "5g")
+test("num_cells=1", result and result.num_cells == 1)
+test("1 cell", result and #result.cells == 1)
+test("pci=920", result and result.cells[1] and result.cells[1].pci == 920)
+test("arfcn=648768", result and result.cells[1] and result.cells[1].arfcn == 648768)
+test("scs=15", result and result.cells[1] and result.cells[1].scs == 15)
+test("band=78", result and result.cells[1] and result.cells[1].band == 78)
+print("")
+
+-- Test 5: 5G no cell lock
+print("Test 5: 5G no cell lock")
+local sample_5g_none = '+QNWLOCK: "common/5g",0\n\nOK'
+result = parser.parse_qnwlock(sample_5g_none)
+test("result parsed", result ~= nil)
+test("type=5g", result and result.type == "5g")
+test("num_cells=0", result and result.num_cells == 0)
+test("0 cells", result and #result.cells == 0)
+print("")
+
+-- Test 6: Unrecognized type returns nil
+print("Test 6: Unrecognized lock type")
+local sample_unknown = '+QNWLOCK: "common/3g",0\n\nOK'
+result = parser.parse_qnwlock(sample_unknown)
+test("returns nil", result == nil)
+print("")
+
+-- Test 7: No QNWLOCK line
+print("Test 7: No QNWLOCK in response")
+result = parser.parse_qnwlock("ERROR\n")
+test("returns nil", result == nil)
+print("")
+
+print("=== Results ===")
+print(string.format("Passed: %d, Failed: %d", passed, failed))
+
+if failed > 0 then
+    os.exit(1)
+end

@@ -39,7 +39,7 @@ define Package/quectel-5g-tools/description
     - 5g-info: CLI tool for displaying modem information
     - 5g-monitor: Real-time TUI monitor with signal quality display and beeps
     - at: Simple AT command wrapper
-    - force-bands: Band locking utility
+    - 5g-lock: Band and cell locking utility
     - Prometheus collector for prometheus-node-exporter-lua
 endef
 
@@ -61,7 +61,7 @@ define Package/quectel-5g-tools/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-info $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-monitor $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/at $(1)/usr/bin/quectel-at
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/force-bands $(1)/usr/bin/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-lock $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/modem-debug $(1)/usr/bin/
 
 	# Install UCI config

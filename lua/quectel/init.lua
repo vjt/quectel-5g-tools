@@ -24,6 +24,8 @@ function M.load_config()
         refresh_interval = 5,
         lte_bands = nil,   -- nil = don't change, {} = all bands
         nr5g_bands = nil,
+        lte_cells = nil,   -- nil = don't change, {} = clear locks
+        nr5g_cells = nil,
     }
 
     -- Try to load from UCI
@@ -53,6 +55,38 @@ function M.load_config()
             config.nr5g_bands = {}
             for _, band in ipairs(nr5g) do
                 table.insert(config.nr5g_bands, tonumber(band))
+            end
+        end
+
+        -- Cell lock lists (earfcn,pci pairs for LTE; pci,arfcn,scs,band for 5G)
+        local lte_cells = cursor:get("quectel", "@modem[0]", "lte_cells")
+        local nr5g_cells = cursor:get("quectel", "@modem[0]", "nr5g_cells")
+
+        if lte_cells and type(lte_cells) == "table" then
+            config.lte_cells = {}
+            for _, entry in ipairs(lte_cells) do
+                local earfcn, pci = entry:match("^(%d+),(%d+)$")
+                if earfcn and pci then
+                    table.insert(config.lte_cells, {
+                        earfcn = tonumber(earfcn),
+                        pci = tonumber(pci),
+                    })
+                end
+            end
+        end
+
+        if nr5g_cells and type(nr5g_cells) == "table" then
+            config.nr5g_cells = {}
+            for _, entry in ipairs(nr5g_cells) do
+                local pci, arfcn, scs, band = entry:match("^(%d+),(%d+),(%d+),(%d+)$")
+                if pci and arfcn and scs and band then
+                    table.insert(config.nr5g_cells, {
+                        pci = tonumber(pci),
+                        arfcn = tonumber(arfcn),
+                        scs = tonumber(scs),
+                        band = tonumber(band),
+                    })
+                end
             end
         end
     end
