@@ -121,7 +121,8 @@ function M.print_serving_cell(status)
         local freq_str = frequency.format_frequency(lte.arfcn or 0, false)
         local dl_bw = frequency.format_bandwidth(lte.bandwidth_dl_mhz)
         local ul_bw = frequency.format_bandwidth(lte.bandwidth_ul_mhz)
-        print(string.format("  Freq: %s | BW: DL %s / UL %s", freq_str, dl_bw, ul_bw))
+        print(string.format("  Freq: %s | EARFCN: %s | BW: DL %s / UL %s",
+            freq_str, lte.arfcn or "?", dl_bw, ul_bw))
     end
 
     if nr then
@@ -141,7 +142,8 @@ function M.print_serving_cell(status)
 
         local freq_str = frequency.format_frequency(nr.arfcn or 0, true)
         local bw = frequency.format_bandwidth(nr.bandwidth_mhz)
-        print(string.format("  Freq: %s | BW: %s", freq_str, bw))
+        print(string.format("  Freq: %s | ARFCN: %s | BW: %s",
+            freq_str, nr.arfcn or "?", bw))
     end
 
     if not lte and not nr then
@@ -169,12 +171,13 @@ function M.print_carrier_aggregation(status)
 
         local bw = frequency.format_bandwidth(carrier.bandwidth_mhz)
         local freq_str = frequency.format_frequency(carrier.arfcn or 0, is_nr)
-        print(string.format("  %s%-3s%s %-8s | PCI %3s | RSRP %s | SINR %s | %7s | %s",
+        local arfcn_label = is_nr and "ARFCN" or "EARFCN"
+        print(string.format("  %s%-3s%s %-8s | PCI %3s | RSRP %s | SINR %s | %7s | %s | %s: %s",
             M.color(col), carrier.role:upper(), M.color(M.Colors.RESET),
             band_name, carrier.pci or "-",
             M.format_signal(carrier.rsrp, rsrp_q),
             M.format_signal(carrier.sinr, sinr_q),
-            bw, freq_str))
+            bw, freq_str, arfcn_label, carrier.arfcn or "?"))
     end
 
     if status.ca.pcc then
@@ -218,8 +221,8 @@ function M.print_neighbours(status, max_rows)
         local rsrp_q = thresholds.rsrp_quality(nb.rsrp)
         local freq_str = frequency.format_frequency(nb.arfcn or 0, false)
 
-        print(string.format("  %-3s %-18s | PCI %3s | RSRP %s | (%s)",
-            nb.rat:upper(), freq_str, nb.pci or "-",
+        print(string.format("  %-3s %-18s | EARFCN: %s | PCI %3s | RSRP %s | (%s)",
+            nb.rat:upper(), freq_str, nb.arfcn or "?", nb.pci or "-",
             M.format_signal(nb.rsrp, rsrp_q),
             nb.scope or "?"))
 
