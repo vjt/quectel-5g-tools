@@ -20,30 +20,34 @@ Install dependencies on OpenWRT:
 opkg install luaposix
 ```
 
-Clone the repo and run directly:
+Clone the repo, symlink and run directly:
 
 ```bash
 git clone https://github.com/vjt/quectel-5g-tools.git
 cd quectel-5g-tools
+ln -s "$PWD/lua/quectel" /usr/lib/lua/quectel
 ./bin/5g-info
 ```
 
-![](doc/5g-info.png)
+![5g-info screenshot](doc/5g-info.png)
 
 ```bash
 ./bin/5g-monitor
 ```
 
-![](doc/5g-monitor.png)
+![5g-monitor screenshot](doc/5g-monitor.png)
 
 Hear it beep!
 
 ## Installation
 
+This is still manual - once I'm gonna upstream it then an easy peasy opkg install will be available.
+
 ### On the router
 
 ```bash
 # Install Lua library
+rm -f /usr/lib/lua/quectel
 cp -r lua/quectel /usr/lib/lua/
 
 # Install CLI tools
@@ -56,15 +60,11 @@ cp lua/prometheus-collectors/quectel.lua /usr/lib/lua/prometheus-collectors/
 cp config/quectel.uci /etc/config/quectel
 ```
 
-### From source checkout
+A ready to use Grafana dashboard (provided you have already set up metrics exporting to prometheus or victoriametrics) is [available here](https://grafana.com/grafana/dashboards/24835) (ID `24835`).
 
-To run the tools directly from a git clone, symlink the Lua module so it can be found by the interpreter:
+Obligatory screenshot:
 
-```bash
-ln -s "$PWD/lua/quectel" /usr/lib/lua/quectel
-```
-
-Then run the binaries directly (e.g. `./bin/5g-info`).
+![Grafana dashboard screenshot](doc/dashboard.png)
 
 ## Usage
 
