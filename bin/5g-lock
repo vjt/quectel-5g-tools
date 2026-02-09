@@ -4,13 +4,7 @@
 package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 
 local quectel = require("quectel")
-local posix_time = require("posix.time")
-
-local function sleep(seconds)
-    local sec = math.floor(seconds)
-    local nsec = math.floor((seconds - sec) * 1e9)
-    posix_time.nanosleep({tv_sec = sec, tv_nsec = nsec})
-end
+local utils = quectel.utils
 
 local function print_usage()
     print("Usage: 5g-lock [OPTION]")
@@ -129,15 +123,13 @@ if action == "reset" then
     print("")
 
     -- Reset bands
-    local resp = modem:send('AT+QNWPREFCFG="lte_band"')
-    if resp and resp:match("OK") then
+    if modem:set_bands("lte_band", {}) then
         print("  LTE bands: reset to all")
     else
         io.stderr:write("  Failed to reset LTE bands\n")
     end
 
-    resp = modem:send('AT+QNWPREFCFG="nsa_nr5g_band"')
-    if resp and resp:match("OK") then
+    if modem:set_bands("nsa_nr5g_band", {}) then
         print("  5G NR bands: reset to all")
     else
         io.stderr:write("  Failed to reset 5G NR bands\n")
@@ -166,7 +158,7 @@ if action == "apply" then
     -- Wait if requested
     if wait_seconds > 0 then
         print(string.format("Waiting for %d seconds...", wait_seconds))
-        sleep(wait_seconds)
+        utils.sleep(wait_seconds)
     end
 
     local config = quectel.load_config()
@@ -201,8 +193,7 @@ if action == "apply" then
         local band_str = table.concat(config.lte_bands, ":")
         print(string.format("  LTE bands: %s", band_str))
 
-        local resp = modem:send('AT+QNWPREFCFG="lte_band",' .. band_str)
-        if resp and resp:match("OK") then
+        if modem:set_bands("lte_band", config.lte_bands) then
             print("    OK")
         else
             io.stderr:write("    Failed\n")
@@ -213,8 +204,7 @@ if action == "apply" then
         local band_str = table.concat(config.nr5g_bands, ":")
         print(string.format("  5G NR bands: %s", band_str))
 
-        local resp = modem:send('AT+QNWPREFCFG="nsa_nr5g_band",' .. band_str)
-        if resp and resp:match("OK") then
+        if modem:set_bands("nsa_nr5g_band", config.nr5g_bands) then
             print("    OK")
         else
             io.stderr:write("    Failed\n")
