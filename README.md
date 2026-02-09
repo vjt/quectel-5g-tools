@@ -119,6 +119,8 @@ Then apply:
 5g-lock --wait=30 --apply  # Wait 30s then apply (for boot scripts)
 ```
 
+The `--apply` command is declarative: it makes the modem match the UCI config exactly. Bands or cell locks removed from the config will be cleared on the modem. Band locks persist across reboots; cell locks do not.
+
 ### AT commands
 
 ```bash
@@ -187,7 +189,8 @@ gl-x3000/
 │   │   ├── parser.lua              # AT response parsing
 │   │   ├── display.lua             # Terminal output formatting
 │   │   ├── frequency.lua           # EARFCN/ARFCN to MHz conversion
-│   │   └── thresholds.lua          # Signal quality thresholds
+│   │   ├── thresholds.lua          # Signal quality thresholds
+│   │   └── utils.lua               # Shared utilities
 │   └── prometheus-collectors/
 │       └── quectel.lua             # Prometheus exporter
 ├── bin/                            # CLI tools

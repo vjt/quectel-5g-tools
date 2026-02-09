@@ -179,16 +179,13 @@ if action == "apply" then
         print("  uci add_list quectel.modem.nr5g_cells='920,648768,15,78'")
         print("")
         print("  uci commit quectel")
-        print("")
-        print_status(modem)
-        modem:close()
-        os.exit(1)
     end
 
+    print("")
     print("Applying lock configuration from UCI...")
     print("")
 
-    -- Apply band locks
+    -- Band locks: apply if configured, reset to all if not
     if config.lte_bands then
         local band_str = table.concat(config.lte_bands, ":")
         print(string.format("  LTE bands: %s", band_str))
@@ -197,6 +194,12 @@ if action == "apply" then
             print("    OK")
         else
             io.stderr:write("    Failed\n")
+        end
+    else
+        if modem:set_bands("lte_band", {}) then
+            print("  LTE bands: reset to all")
+        else
+            io.stderr:write("  Failed to reset LTE bands\n")
         end
     end
 
@@ -209,9 +212,15 @@ if action == "apply" then
         else
             io.stderr:write("    Failed\n")
         end
+    else
+        if modem:set_bands("nsa_nr5g_band", {}) then
+            print("  5G NR bands: reset to all")
+        else
+            io.stderr:write("  Failed to reset 5G NR bands\n")
+        end
     end
 
-    -- Apply cell locks
+    -- Cell locks: apply if configured, clear if not
     if config.lte_cells and #config.lte_cells > 0 then
         local parts = {}
         for _, cell in ipairs(config.lte_cells) do
@@ -224,6 +233,12 @@ if action == "apply" then
         else
             io.stderr:write("    Failed\n")
         end
+    else
+        if modem:clear_cell_lock("common/4g") then
+            print("  LTE cell lock: cleared")
+        else
+            io.stderr:write("  Failed to clear LTE cell lock\n")
+        end
     end
 
     if config.nr5g_cells and #config.nr5g_cells > 0 then
@@ -235,6 +250,12 @@ if action == "apply" then
             print("    OK")
         else
             io.stderr:write("    Failed\n")
+        end
+    else
+        if modem:clear_cell_lock("common/5g") then
+            print("  5G NR cell lock: cleared")
+        else
+            io.stderr:write("  Failed to clear 5G NR cell lock\n")
         end
     end
 

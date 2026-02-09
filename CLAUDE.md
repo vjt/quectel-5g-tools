@@ -9,11 +9,12 @@ The goal is to extract signal information from the modem to aid accurate pointin
 **IMPLEMENTED** in Lua:
 
 - `lua/quectel/` - Core library for modem communication and AT command parsing
+- `lua/quectel/utils.lua` - Shared utilities (sleep, format_band, extract_enodeb, add_frequency_info, same_cell)
 - `lua/prometheus-collectors/quectel.lua` - Prometheus metrics exporter
 - `bin/5g-info` - CLI tool for displaying modem info (table/JSON output)
 - `bin/5g-monitor` - ncurses TUI with color-coded signals and beep feedback
 - `bin/at` - Simple AT command wrapper
-- `bin/5g-lock` - Band and cell locking utility
+- `bin/5g-lock` - Band and cell locking utility (declarative: `--apply` makes modem match UCI config exactly)
 
 See `README.md` for usage documentation.
 
@@ -24,6 +25,7 @@ See `README.md` for usage documentation.
 - **Configuration**: UCI only (`/etc/config/quectel`)
 - **Audio feedback**: Terminal bell (`\a`) for SSH compatibility
 - **Metrics**: Prometheus exporter for Grafana integration
+- **SINR source**: Always use `AT+QENG="servingcell"` for SINR; QCAINFO reports a different metric (RSSNR)
 
 ## Legacy Python Implementation
 
