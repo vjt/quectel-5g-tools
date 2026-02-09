@@ -12,6 +12,8 @@ local DEFAULT_COMMANDS = {
     'AT+QNWPREFCFG="mode_pref"',
     'AT+QNWPREFCFG="nsa_nr5g_band"',
     'AT+QNWPREFCFG="lte_band"',
+    'AT+QNWLOCK="common/4g"',
+    'AT+QNWLOCK="common/5g"',
     "AT+QCAINFO",
     'AT+QENG="servingcell"',
     'AT+QENG="neighbourcell"',
