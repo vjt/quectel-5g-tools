@@ -135,17 +135,27 @@ if action == "reset" then
         io.stderr:write("  Failed to reset 5G NR bands\n")
     end
 
-    -- Clear cell locks
-    if modem:clear_cell_lock("common/4g") then
-        print("  LTE cell lock: cleared")
+    -- Clear cell locks (only if active)
+    local lte_lock = modem:get_cell_lock("common/4g")
+    if lte_lock and lte_lock.num_cells > 0 then
+        if modem:clear_cell_lock("common/4g") then
+            print("  LTE cell lock: cleared")
+        else
+            io.stderr:write("  Failed to clear LTE cell lock\n")
+        end
     else
-        io.stderr:write("  Failed to clear LTE cell lock\n")
+        print("  LTE cell lock: none")
     end
 
-    if modem:clear_cell_lock("common/5g") then
-        print("  5G NR cell lock: cleared")
+    local nr_lock = modem:get_cell_lock("common/5g")
+    if nr_lock and nr_lock.num_cells > 0 then
+        if modem:clear_cell_lock("common/5g") then
+            print("  5G NR cell lock: cleared")
+        else
+            io.stderr:write("  Failed to clear 5G NR cell lock\n")
+        end
     else
-        io.stderr:write("  Failed to clear 5G NR cell lock\n")
+        print("  5G NR cell lock: none")
     end
 
     print("")
@@ -234,10 +244,15 @@ if action == "apply" then
             io.stderr:write("    Failed\n")
         end
     else
-        if modem:clear_cell_lock("common/4g") then
-            print("  LTE cell lock: cleared")
+        local lte_lock = modem:get_cell_lock("common/4g")
+        if lte_lock and lte_lock.num_cells > 0 then
+            if modem:clear_cell_lock("common/4g") then
+                print("  LTE cell lock: cleared")
+            else
+                io.stderr:write("  Failed to clear LTE cell lock\n")
+            end
         else
-            io.stderr:write("  Failed to clear LTE cell lock\n")
+            print("  LTE cell lock: none")
         end
     end
 
@@ -252,10 +267,15 @@ if action == "apply" then
             io.stderr:write("    Failed\n")
         end
     else
-        if modem:clear_cell_lock("common/5g") then
-            print("  5G NR cell lock: cleared")
+        local nr_lock = modem:get_cell_lock("common/5g")
+        if nr_lock and nr_lock.num_cells > 0 then
+            if modem:clear_cell_lock("common/5g") then
+                print("  5G NR cell lock: cleared")
+            else
+                io.stderr:write("  Failed to clear 5G NR cell lock\n")
+            end
         else
-            io.stderr:write("  Failed to clear 5G NR cell lock\n")
+            print("  5G NR cell lock: none")
         end
     end
 
