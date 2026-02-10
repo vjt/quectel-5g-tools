@@ -162,6 +162,28 @@ test("LTE duplex=FDD", result.lte and result.lte.duplex == "FDD")
 test("NR5G nil", result.nr5g == nil)
 print("")
 
+-- Test 10: parse_qnwprefcfg_from (multi-line ue_capability_band)
+print("Test 10: parse_qnwprefcfg_from (ue_capability_band)")
+local ue_cap_sample = [[
++QNWPREFCFG: "gw_band",1:8
++QNWPREFCFG: "lte_band",1:3:7:8:20:28:32:38:40:41:42
++QNWPREFCFG: "nsa_nr5g_band",1:3:7:28:41:77:78:79
++QNWPREFCFG: "nr5g_band",1:3:7:28:41:77:78:79
+
+OK
+]]
+local setting, bands = parser.parse_qnwprefcfg_from(ue_cap_sample, "lte_band")
+test("setting=lte_band", setting == "lte_band")
+test("11 LTE bands", bands and #bands == 11)
+test("first band=1", bands and bands[1] == 1)
+test("last band=42", bands and bands[#bands] == 42)
+
+setting, bands = parser.parse_qnwprefcfg_from(ue_cap_sample, "nsa_nr5g_band")
+test("setting=nsa_nr5g_band", setting == "nsa_nr5g_band")
+test("8 NR5G bands", bands and #bands == 8)
+test("includes band 78", bands and bands[7] == 78)
+print("")
+
 print("=== Results ===")
 print(string.format("Passed: %d, Failed: %d", passed, failed))
 

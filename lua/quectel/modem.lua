@@ -237,18 +237,25 @@ end
 
 --- Set band configuration
 -- @param setting "lte_band" or "nsa_nr5g_band"
--- @param bands Table of band numbers, or nil to reset to all
+-- @param bands Table of band numbers, or empty/nil to reset to all supported bands
 -- @return true on success
 function M:set_bands(setting, bands)
-    local value
     if bands and #bands > 0 then
-        value = table.concat(bands, ":")
-    else
-        -- Empty means all bands
-        value = ""
+        local value = table.concat(bands, ":")
+        local resp, err = self:send('AT+QNWPREFCFG="' .. setting .. '",' .. value)
+        if not resp then return nil, err end
+        return resp:match("OK") ~= nil
     end
 
-    local resp, err = self:send('AT+QNWPREFCFG="' .. setting .. '",' .. value)
+    -- Reset to all bands: query carrier policy for the full supported set
+    local resp, err = self:send('AT+QNWPREFCFG="policy_band"')
+    if not resp then return nil, err end
+    local _, all_bands = parser.parse_qnwprefcfg_from(resp, setting)
+    if not all_bands or #all_bands == 0 then
+        return nil, "could not determine supported bands from policy_band"
+    end
+    local value = table.concat(all_bands, ":")
+    resp, err = self:send('AT+QNWPREFCFG="' .. setting .. '",' .. value)
     if not resp then return nil, err end
     return resp:match("OK") ~= nil
 end

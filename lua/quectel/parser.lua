@@ -330,7 +330,7 @@ end
 
 --- Parse +QNWPREFCFG response for band configuration
 -- @param text AT+QNWPREFCFG response
--- @return Table with setting name and value
+-- @return setting name, value (string or table of bands)
 function M.parse_qnwprefcfg(text)
     for values in M.parse_response(text, "+QNWPREFCFG") do
         local setting = values[1]
@@ -346,6 +346,29 @@ function M.parse_qnwprefcfg(text)
         end
 
         return setting, value
+    end
+    return nil, nil
+end
+
+--- Parse +QNWPREFCFG multi-line response for a specific setting
+-- Used for ue_capability_band/policy_band which return multiple lines
+-- @param text AT+QNWPREFCFG response (may contain multiple +QNWPREFCFG lines)
+-- @param target Setting name to find (e.g., "lte_band", "nsa_nr5g_band")
+-- @return setting name, value (string or table of bands)
+function M.parse_qnwprefcfg_from(text, target)
+    for values in M.parse_response(text, "+QNWPREFCFG") do
+        local setting = values[1]
+        if setting == target then
+            local value = values[2]
+            if setting:match("band$") and value then
+                local bands = {}
+                for band in value:gmatch("(%d+)") do
+                    table.insert(bands, tonumber(band))
+                end
+                return setting, bands
+            end
+            return setting, value
+        end
     end
     return nil, nil
 end

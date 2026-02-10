@@ -97,6 +97,20 @@ AT+QENG="servingcell"
 +QENG: "NR5G-NSA",222,01,920,-96,18,-10,648768,78,10,1
 
 OK
+```
+
+The serving cell response can also appear in single-line format (LTE-only, no NR5G):
+```
+AT+QENG="servingcell"
+
++QENG: "servingcell","NOCONN","LTE","FDD",222,01,4940206,427,1350,3,5,5,BFF,-93,-11,-61,11,7,50,-
+
+OK
+```
+
+The parser handles both formats.
+
+```
 AT+QENG="neighbourcell"
 
 +QENG: "neighbourcell intra","LTE",275,280,-14,-99,-67,-,-,-,-,-,-
