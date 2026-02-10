@@ -119,6 +119,49 @@ end
 --- Parse +QENG="servingcell" response
 -- @param text AT+QENG="servingcell" response
 -- @return Table with serving cell info (LTE and optionally NR5G-NSA)
+--
+-- Handles two response formats:
+--   Two-line:  +QENG: "servingcell","NOCONN"  /  +QENG: "LTE","FDD",...
+--   One-line:  +QENG: "servingcell","NOCONN","LTE","FDD",...
+
+-- Parse LTE fields from values array starting at offset o
+-- o is the index of the duplex field (FDD/TDD)
+local function parse_lte_fields(values, o)
+    return {
+        duplex = values[o],
+        mcc = tonumber(values[o + 1]),
+        mnc = tonumber(values[o + 2]),
+        cell_id = values[o + 3],
+        pci = tonumber(values[o + 4]),
+        arfcn = tonumber(values[o + 5]),
+        band = tonumber(values[o + 6]),
+        bandwidth_dl = tonumber(values[o + 7]),
+        bandwidth_ul = tonumber(values[o + 8]),
+        tac = values[o + 9],
+        rsrp = tonumber(values[o + 10]),
+        rsrq = tonumber(values[o + 11]),
+        rssi = tonumber(values[o + 12]),
+        sinr = tonumber(values[o + 13]),
+    }
+end
+
+-- Parse NR5G-NSA fields from values array starting at offset o
+-- o is the index of the mcc field
+local function parse_nr5g_fields(values, o)
+    return {
+        mcc = tonumber(values[o]),
+        mnc = tonumber(values[o + 1]),
+        pci = tonumber(values[o + 2]),
+        rsrp = tonumber(values[o + 3]),
+        sinr = tonumber(values[o + 4]),
+        rsrq = tonumber(values[o + 5]),
+        arfcn = tonumber(values[o + 6]),
+        band = tonumber(values[o + 7]),
+        bandwidth = tonumber(values[o + 8]),
+        scs = tonumber(values[o + 9]),
+    }
+end
+
 function M.parse_serving_cell(text)
     local result = {
         state = nil,
@@ -132,37 +175,18 @@ function M.parse_serving_cell(text)
         if cell_type == "servingcell" then
             result.state = values[2]
 
+            -- Handle single-line format: "servingcell","NOCONN","LTE","FDD",...
+            if values[3] == "LTE" then
+                result.lte = parse_lte_fields(values, 4)
+            elseif values[3] == "NR5G-NSA" then
+                result.nr5g = parse_nr5g_fields(values, 4)
+            end
+
         elseif cell_type == "LTE" then
-            result.lte = {
-                duplex = values[2],      -- FDD/TDD
-                mcc = tonumber(values[3]),
-                mnc = tonumber(values[4]),
-                cell_id = values[5],     -- hex string
-                pci = tonumber(values[6]),
-                arfcn = tonumber(values[7]),
-                band = tonumber(values[8]),
-                bandwidth_dl = tonumber(values[9]),
-                bandwidth_ul = tonumber(values[10]),
-                tac = values[11],
-                rsrp = tonumber(values[12]),
-                rsrq = tonumber(values[13]),
-                rssi = tonumber(values[14]),
-                sinr = tonumber(values[15]),
-            }
+            result.lte = parse_lte_fields(values, 2)
 
         elseif cell_type == "NR5G-NSA" then
-            result.nr5g = {
-                mcc = tonumber(values[2]),
-                mnc = tonumber(values[3]),
-                pci = tonumber(values[4]),
-                rsrp = tonumber(values[5]),
-                sinr = tonumber(values[6]),
-                rsrq = tonumber(values[7]),
-                arfcn = tonumber(values[8]),
-                band = tonumber(values[9]),
-                bandwidth = tonumber(values[10]),
-                scs = tonumber(values[11]),  -- subcarrier spacing
-            }
+            result.nr5g = parse_nr5g_fields(values, 2)
         end
     end
 

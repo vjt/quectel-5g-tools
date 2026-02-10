@@ -120,6 +120,48 @@ test("SCC1 pci=406 (not 1)", result.scc[1] and result.scc[1].pci == 406)
 test("SCC2 pci=697", result.scc[2] and result.scc[2].pci == 697)
 print("")
 
+-- Test 8: Serving cell - two-line format (LTE + NR5G)
+print("Test 8: Serving cell two-line format")
+local sc_two_line = [[
++QENG: "servingcell","NOCONN"
++QENG: "LTE","FDD",222,01,328261F,280,275,1,4,4,BE3,-99,-14,-66,7,4,30,-
++QENG: "NR5G-NSA",222,01,920,-96,18,-10,648768,78,10,1
+
+OK
+]]
+result = parser.parse_serving_cell(sc_two_line)
+test("state=NOCONN", result.state == "NOCONN")
+test("LTE parsed", result.lte ~= nil)
+test("LTE pci=280", result.lte and result.lte.pci == 280)
+test("LTE band=1", result.lte and result.lte.band == 1)
+test("LTE arfcn=275", result.lte and result.lte.arfcn == 275)
+test("LTE sinr=7", result.lte and result.lte.sinr == 7)
+test("NR5G parsed", result.nr5g ~= nil)
+test("NR5G pci=920", result.nr5g and result.nr5g.pci == 920)
+test("NR5G band=78", result.nr5g and result.nr5g.band == 78)
+test("NR5G sinr=18", result.nr5g and result.nr5g.sinr == 18)
+print("")
+
+-- Test 9: Serving cell - single-line format (LTE only)
+print("Test 9: Serving cell single-line format (LTE only)")
+local sc_single = [[
++QENG: "servingcell","NOCONN","LTE","FDD",222,01,4940206,427,1350,3,5,5,BFF,-93,-11,-61,11,7,50,-
+
+OK
+]]
+result = parser.parse_serving_cell(sc_single)
+test("state=NOCONN", result.state == "NOCONN")
+test("LTE parsed", result.lte ~= nil)
+test("LTE pci=427", result.lte and result.lte.pci == 427)
+test("LTE band=3", result.lte and result.lte.band == 3)
+test("LTE arfcn=1350", result.lte and result.lte.arfcn == 1350)
+test("LTE sinr=11", result.lte and result.lte.sinr == 11)
+test("LTE rsrp=-93", result.lte and result.lte.rsrp == -93)
+test("LTE cell_id=4940206", result.lte and result.lte.cell_id == "4940206")
+test("LTE duplex=FDD", result.lte and result.lte.duplex == "FDD")
+test("NR5G nil", result.nr5g == nil)
+print("")
+
 print("=== Results ===")
 print(string.format("Passed: %d, Failed: %d", passed, failed))
 
