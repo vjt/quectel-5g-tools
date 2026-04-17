@@ -1,10 +1,15 @@
 # OpenWRT package Makefile for quectel-5g-tools
 #
-# To build:
-#   1. Clone this repo into openwrt/package/feeds/packages/quectel-5g-tools
-#   2. Run: ./scripts/feeds update -a && ./scripts/feeds install quectel-5g-tools
-#   3. Run: make menuconfig  (select Network -> quectel-5g-tools)
-#   4. Run: make package/quectel-5g-tools/compile
+# To build as a local feed:
+#   1. Clone this repo somewhere persistent on the build host
+#   2. Add to <openwrt>/feeds.conf:
+#        src-link custom /path/to/feeds-local
+#   3. Symlink this package dir into feeds-local/:
+#        ln -s /path/to/quectel-5g-tools/openwrt/quectel-5g-tools \
+#              <openwrt>/feeds-local/quectel-5g-tools
+#   4. ./scripts/feeds update custom && ./scripts/feeds install -a -p custom
+#   5. make menuconfig (Network -> quectel-5g-tools)
+#   6. make package/quectel-5g-tools/compile
 
 include $(TOPDIR)/rules.mk
 
