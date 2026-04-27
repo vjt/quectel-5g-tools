@@ -73,7 +73,12 @@ local interval = tonumber(uci_get("led_bars.interval")) or 10
 set_trigger_none()
 apply_bars(0)
 
+-- Re-asserting trigger=none on every cycle is cheap (4 sysfs writes) and
+-- guards against `/etc/init.d/system reload` (or any external re-apply
+-- of UCI led config) flipping the trigger back to netdev. Without it,
+-- a quectel UCI reload would silently break the bars until next reboot.
 while true do
+    set_trigger_none()
     apply_bars(rsrp_to_bars(read_rsrp()))
     utils.sleep(interval)
 end
