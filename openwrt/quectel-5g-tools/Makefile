@@ -15,7 +15,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/vjt/quectel-5g-tools.git
@@ -53,15 +53,33 @@ define Package/quectel-5g-tools/description
     - Prometheus collector for prometheus-node-exporter-lua
 endef
 
-MBIM_WATCHDOG_LIBS:=mbim-glib gio-2.0
+# Force libmbim + glib2 to be built and staged before our compile step.
+# In sdk-feed mode, PKG_BUILD_DEPENDS does not always trigger dependency
+# compilation (the parent `make package/<pkg>/compile` invocation only
+# resolves runtime DEPENDS at install time, not at configure time), so a
+# fresh SDK can reach Build/Compile with no headers under
+# $(STAGING_DIR)/usr/include/libmbim-glib and the gcc fails on glib.h.
+# Recursively make the deps here so the staging dir is populated before
+# we invoke the compiler.
+define Build/Configure
+	+$(MAKE) -C $(TOPDIR) package/libmbim/compile package/glib2/compile V=s
+endef
 
+# Explicit -I/-l paths beat $(PKG_CONFIG) substitution: the SDK's
+# pkg-config wrapper expects STAGING_DIR_HOST + PKG_CONFIG_PATH to be
+# set in the environment at the point of `make package/.../compile`,
+# and that's not guaranteed when the build is triggered via the
+# top-level `make` from the builder bootstrap script. Hardcoding the
+# include and library names sidesteps the wrapper entirely.
 define Build/Compile
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_CPPFLAGS) \
-		$$($(PKG_CONFIG) --cflags $(MBIM_WATCHDOG_LIBS)) \
+		-I$(STAGING_DIR)/usr/include/libmbim-glib \
+		-I$(STAGING_DIR)/usr/include/glib-2.0 \
+		-I$(STAGING_DIR)/usr/lib/glib-2.0/include \
 		-o $(PKG_BUILD_DIR)/src/mbim-watchdog \
 		$(PKG_BUILD_DIR)/src/mbim-watchdog.c \
 		$(TARGET_LDFLAGS) \
-		$$($(PKG_CONFIG) --libs $(MBIM_WATCHDOG_LIBS))
+		-lmbim-glib -lgio-2.0 -lgobject-2.0 -lglib-2.0
 endef
 
 define Package/quectel-5g-tools/install
