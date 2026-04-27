@@ -13,3 +13,7 @@ config modem 'modem'
 #	list lte_cells '275,280'
 #	list lte_cells '1350,427'
 #	list nr5g_cells '920,648768,15,78'
+
+config led_bars 'led_bars'
+	option enabled '1'
+	option interval '10'

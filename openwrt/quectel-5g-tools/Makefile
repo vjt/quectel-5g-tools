@@ -15,7 +15,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/vjt/quectel-5g-tools.git
@@ -43,6 +43,7 @@ define Package/quectel-5g-tools/description
   Includes:
     - 5g-info: CLI tool for displaying modem information
     - 5g-monitor: Real-time TUI monitor with signal quality display and beeps
+    - 5g-led-bars: procd service driving the GL-X3000 5G signal LEDs from RSRP
     - at: Simple AT command wrapper
     - 5g-lock: Band and cell locking utility
     - Prometheus collector for prometheus-node-exporter-lua
@@ -65,9 +66,14 @@ define Package/quectel-5g-tools/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-info $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-monitor $(1)/usr/bin/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-led-bars $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/at $(1)/usr/bin/quectel-at
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-lock $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/modem-debug $(1)/usr/bin/
+
+	# Install procd init scripts
+	$(INSTALL_DIR) $(1)/etc/init.d
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/init.d/5g-led-bars $(1)/etc/init.d/
 
 	# Install UCI config
 	$(INSTALL_DIR) $(1)/etc/config

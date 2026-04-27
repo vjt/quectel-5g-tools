@@ -1,0 +1,79 @@
+#!/usr/bin/env lua
+-- 5g-led-bars: drive GL-X3000 5G signal LEDs from modem RSRP.
+--
+-- Polls the modem at a configurable interval, maps PCC RSRP to a 0..4
+-- bar count, and writes the corresponding brightness to the four
+-- `green:5g:led{1..4}` GPIO LEDs. On startup the LED triggers are set
+-- to `none` so the netdev trigger does not fight back.
+
+package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
+
+local quectel = require("quectel")
+local utils = require("quectel.utils")
+
+local LED_PREFIX = "/sys/class/leds/green:5g:led"
+local LED_COUNT = 4
+
+-- RSRP (dBm) thresholds for bars 1..4. Bar N is lit when rsrp >= THRESHOLDS[N].
+local THRESHOLDS = { -115, -105, -95, -85 }
+
+local function uci_get(key)
+    local f = io.popen("uci -q get quectel." .. key .. " 2>/dev/null")
+    if not f then return nil end
+    local v = f:read("*l")
+    f:close()
+    if v == nil or v == "" then return nil end
+    return v
+end
+
+local function write_file(path, value)
+    local f = io.open(path, "w")
+    if not f then return end
+    f:write(value)
+    f:close()
+end
+
+local function set_trigger_none()
+    for n = 1, LED_COUNT do
+        write_file(LED_PREFIX .. n .. "/trigger", "none\n")
+    end
+end
+
+local function rsrp_to_bars(rsrp)
+    if not rsrp then return 0 end
+    local bars = 0
+    for _, t in ipairs(THRESHOLDS) do
+        if rsrp >= t then bars = bars + 1 end
+    end
+    return bars
+end
+
+local function apply_bars(bars)
+    for n = 1, LED_COUNT do
+        write_file(LED_PREFIX .. n .. "/brightness", bars >= n and "1" or "0")
+    end
+end
+
+local function read_rsrp()
+    local m = quectel.create_modem()
+    local ok, status = pcall(function() return m:get_signal_status() end)
+    pcall(function() m:close() end)
+    if not ok or not status then return nil end
+    if status.ca and status.ca.pcc and status.ca.pcc.rsrp then
+        return status.ca.pcc.rsrp
+    end
+    if status.serving and status.serving.rsrp then
+        return status.serving.rsrp
+    end
+    return nil
+end
+
+local interval = tonumber(uci_get("led_bars.interval")) or 10
+
+set_trigger_none()
+apply_bars(0)
+
+while true do
+    apply_bars(rsrp_to_bars(read_rsrp()))
+    utils.sleep(interval)
+end
