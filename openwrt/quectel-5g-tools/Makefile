@@ -15,7 +15,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/vjt/quectel-5g-tools.git
@@ -27,13 +27,15 @@ PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=Marcello Barnaba <mbarnaba@meta.com>
 
+PKG_BUILD_DEPENDS:=libmbim glib2
+
 include $(INCLUDE_DIR)/package.mk
 
 define Package/quectel-5g-tools
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Quectel 5G Modem Tools
-  DEPENDS:=+lua +luaposix
+  DEPENDS:=+lua +luaposix +libmbim +glib2
   URL:=https://github.com/vjt/quectel-5g-tools
 endef
 
@@ -44,13 +46,22 @@ define Package/quectel-5g-tools/description
     - 5g-info: CLI tool for displaying modem information
     - 5g-monitor: Real-time TUI monitor with signal quality display and beeps
     - 5g-led-bars: procd service driving the GL-X3000 5G signal LEDs from RSRP
+    - mbim-watchdog: procd daemon that watches MBIM Connect indications and
+      reconnects via `ifup` when the carrier deactivates the data session
     - at: Simple AT command wrapper
     - 5g-lock: Band and cell locking utility
     - Prometheus collector for prometheus-node-exporter-lua
 endef
 
+MBIM_WATCHDOG_LIBS:=mbim-glib gio-2.0
+
 define Build/Compile
-	# Nothing to compile, pure Lua
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_CPPFLAGS) \
+		$$($(PKG_CONFIG) --cflags $(MBIM_WATCHDOG_LIBS)) \
+		-o $(PKG_BUILD_DIR)/src/mbim-watchdog \
+		$(PKG_BUILD_DIR)/src/mbim-watchdog.c \
+		$(TARGET_LDFLAGS) \
+		$$($(PKG_CONFIG) --libs $(MBIM_WATCHDOG_LIBS))
 endef
 
 define Package/quectel-5g-tools/install
@@ -70,10 +81,12 @@ define Package/quectel-5g-tools/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/at $(1)/usr/bin/quectel-at
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-lock $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/modem-debug $(1)/usr/bin/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/src/mbim-watchdog $(1)/usr/bin/
 
 	# Install procd init scripts
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/init.d/5g-led-bars $(1)/etc/init.d/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/init.d/mbim-watchdog $(1)/etc/init.d/
 
 	# Install UCI config
 	$(INSTALL_DIR) $(1)/etc/config

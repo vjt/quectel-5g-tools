@@ -17,3 +17,8 @@ config modem 'modem'
 config led_bars 'led_bars'
 	option enabled '1'
 	option interval '10'
+
+config mbim_watchdog 'mbim_watchdog'
+	option enabled '1'
+	option device '/dev/wwan0mbim0'
+	option iface 'wwan'
