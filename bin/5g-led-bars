@@ -54,11 +54,33 @@ local function apply_bars(bars)
     end
 end
 
+-- Prefer 5G NR RSRP whenever an NR carrier is present, even in NSA where
+-- the PCC is the LTE anchor: the LEDs are labelled "5G" and the user
+-- cares about NR coverage, not the LTE leg holding control plane. Pick
+-- the strongest NR carrier (PCC or any NR SCC); fall back to PCC RSRP
+-- if there are no NR carriers (pure-LTE attach).
+local function best_nr_rsrp(ca)
+    if not ca then return nil end
+    local best = nil
+    local function consider(c)
+        if c and c.rat == "nr5g" and c.rsrp then
+            if not best or c.rsrp > best then best = c.rsrp end
+        end
+    end
+    consider(ca.pcc)
+    for _, scc in ipairs(ca.scc or {}) do consider(scc) end
+    return best
+end
+
 local function read_rsrp()
     local m = quectel.create_modem()
     local ok, status = pcall(function() return m:get_signal_status() end)
     pcall(function() m:close() end)
     if not ok or not status then return nil end
+
+    local nr = best_nr_rsrp(status.ca)
+    if nr then return nr end
+
     if status.ca and status.ca.pcc and status.ca.pcc.rsrp then
         return status.ca.pcc.rsrp
     end
