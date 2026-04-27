@@ -15,7 +15,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/vjt/quectel-5g-tools.git
@@ -53,17 +53,14 @@ define Package/quectel-5g-tools/description
     - Prometheus collector for prometheus-node-exporter-lua
 endef
 
-# Force libmbim + glib2 to be built and staged before our compile step.
-# In sdk-feed mode, PKG_BUILD_DEPENDS does not always trigger dependency
-# compilation (the parent `make package/<pkg>/compile` invocation only
-# resolves runtime DEPENDS at install time, not at configure time), so a
-# fresh SDK can reach Build/Compile with no headers under
-# $(STAGING_DIR)/usr/include/libmbim-glib and the gcc fails on glib.h.
-# Recursively make the deps here so the staging dir is populated before
-# we invoke the compiler.
-define Build/Configure
-	+$(MAKE) -C $(TOPDIR) package/libmbim/compile package/glib2/compile V=s
-endef
+# libmbim + glib2 must be staged before this Build/Compile runs.
+# Tried `+$(MAKE) -C $(TOPDIR) package/libmbim/compile` from a Build/Configure
+# recipe — fails fast with no useful diagnostic (sub-make recursion inside a
+# package compile is not honoured). The reliable way is to have the builder
+# bootstrap script compile those deps first; we configure that via the repo's
+# `pre_compile_deps: [libmbim, glib2]` field in the openwrt-builder config.
+# Keep PKG_BUILD_DEPENDS for documentation + correct dep ordering when this
+# package is built from the buildroot top.
 
 # Explicit -I/-l paths beat $(PKG_CONFIG) substitution: the SDK's
 # pkg-config wrapper expects STAGING_DIR_HOST + PKG_CONFIG_PATH to be
