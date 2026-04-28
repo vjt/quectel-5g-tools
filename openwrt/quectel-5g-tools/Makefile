@@ -15,7 +15,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=13
+PKG_RELEASE:=14
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/vjt/quectel-5g-tools.git
@@ -47,6 +47,13 @@ define Package/quectel-5g-tools/description
     - at: Simple AT command wrapper
     - 5g-lock: Band and cell locking utility
     - Prometheus collector for prometheus-node-exporter-lua
+endef
+
+# This is a pure-script package — there's no top-level Makefile in the
+# source tree to drive a build. Override the default Build/Compile (which
+# would invoke `make` in PKG_BUILD_DIR and fail with "no Makefile found")
+# with a no-op so the build phase succeeds and Package/install runs.
+define Build/Compile
 endef
 
 define Package/quectel-5g-tools/install
