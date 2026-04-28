@@ -99,8 +99,17 @@ apply_bars(0)
 -- guards against `/etc/init.d/system reload` (or any external re-apply
 -- of UCI led config) flipping the trigger back to netdev. Without it,
 -- a quectel UCI reload would silently break the bars until next reboot.
+--
+-- On read failure (AT serial lock contention with another quectel-5g-tools
+-- consumer, modem busy under load, transient cdc_mbim hiccup) we hold the
+-- last successful bar count rather than dropping to 0. Single missed poll
+-- shouldn't make the LEDs flicker off and back on — that's misleading
+-- when nothing's actually wrong with the link.
 while true do
     set_trigger_none()
-    apply_bars(rsrp_to_bars(read_rsrp()))
+    local rsrp = read_rsrp()
+    if rsrp then
+        apply_bars(rsrp_to_bars(rsrp))
+    end
     utils.sleep(interval)
 end
