@@ -15,7 +15,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=11
+PKG_RELEASE:=13
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/vjt/quectel-5g-tools.git
@@ -27,15 +27,13 @@ PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=Marcello Barnaba <mbarnaba@meta.com>
 
-PKG_BUILD_DEPENDS:=libmbim glib2
-
 include $(INCLUDE_DIR)/package.mk
 
 define Package/quectel-5g-tools
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Quectel 5G Modem Tools
-  DEPENDS:=+lua +luaposix +libuci-lua +libmbim +glib2
+  DEPENDS:=+lua +luaposix +libuci-lua
   URL:=https://github.com/vjt/quectel-5g-tools
 endef
 
@@ -46,37 +44,9 @@ define Package/quectel-5g-tools/description
     - 5g-info: CLI tool for displaying modem information
     - 5g-monitor: Real-time TUI monitor with signal quality display and beeps
     - 5g-led-bars: procd service driving the GL-X3000 5G signal LEDs from RSRP
-    - mbim-watchdog: procd daemon that watches MBIM Connect indications and
-      reconnects via `ifup` when the carrier deactivates the data session
     - at: Simple AT command wrapper
     - 5g-lock: Band and cell locking utility
     - Prometheus collector for prometheus-node-exporter-lua
-endef
-
-# libmbim + glib2 must be staged before this Build/Compile runs.
-# Tried `+$(MAKE) -C $(TOPDIR) package/libmbim/compile` from a Build/Configure
-# recipe — fails fast with no useful diagnostic (sub-make recursion inside a
-# package compile is not honoured). The reliable way is to have the builder
-# bootstrap script compile those deps first; we configure that via the repo's
-# `pre_compile_deps: [libmbim, glib2]` field in the openwrt-builder config.
-# Keep PKG_BUILD_DEPENDS for documentation + correct dep ordering when this
-# package is built from the buildroot top.
-
-# Explicit -I/-l paths beat $(PKG_CONFIG) substitution: the SDK's
-# pkg-config wrapper expects STAGING_DIR_HOST + PKG_CONFIG_PATH to be
-# set in the environment at the point of `make package/.../compile`,
-# and that's not guaranteed when the build is triggered via the
-# top-level `make` from the builder bootstrap script. Hardcoding the
-# include and library names sidesteps the wrapper entirely.
-define Build/Compile
-	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_CPPFLAGS) \
-		-I$(STAGING_DIR)/usr/include/libmbim-glib \
-		-I$(STAGING_DIR)/usr/include/glib-2.0 \
-		-I$(STAGING_DIR)/usr/lib/glib-2.0/include \
-		-o $(PKG_BUILD_DIR)/src/mbim-watchdog \
-		$(PKG_BUILD_DIR)/src/mbim-watchdog.c \
-		$(TARGET_LDFLAGS) \
-		-lmbim-glib -lgio-2.0 -lgobject-2.0 -lglib-2.0
 endef
 
 define Package/quectel-5g-tools/install
@@ -96,12 +66,18 @@ define Package/quectel-5g-tools/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/at $(1)/usr/bin/quectel-at
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-lock $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/modem-debug $(1)/usr/bin/
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/src/mbim-watchdog $(1)/usr/bin/
 
 	# Install procd init scripts
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/init.d/5g-led-bars $(1)/etc/init.d/
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/init.d/mbim-watchdog $(1)/etc/init.d/
+
+	# Tell ModemManager to skip the Quectel USB AT/DIAG/NMEA/AT2 ports
+	# (/dev/ttyUSB0..3). The patched /etc/hotplug.d/tty/25-modemmanager-tty
+	# (see x3000/prepare.sh in the OpenWrt fork) honours this list and
+	# never reports those ports to MM, leaving them free for our own
+	# 5g-info / 5g-monitor / 5g-lock / 5g-led-bars helpers.
+	$(INSTALL_DIR) $(1)/etc/modemmanager
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/config/mm-ignore-tty $(1)/etc/modemmanager/ignore-tty
 
 	# Install uci-defaults (runs once on first boot; see file header)
 	$(INSTALL_DIR) $(1)/etc/uci-defaults

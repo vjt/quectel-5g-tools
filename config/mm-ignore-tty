@@ -1,0 +1,13 @@
+# Ports listed here are skipped by /etc/hotplug.d/tty/25-modemmanager-tty
+# and therefore never reported to ModemManager via mmcli --report-kernel-event.
+# MM consequently never opens or owns them.
+#
+# We use this to keep /dev/ttyUSB[0-3] (Quectel RM520N USB-side
+# DIAG/NMEA/AT/AT2 ports) under the control of quectel-5g-tools'
+# helpers (5g-info, 5g-monitor, 5g-lock, 5g-led-bars) which talk raw AT
+# over /dev/ttyUSB2. MM still drives the MHI control surface
+# (/dev/wwan0at0 + /dev/wwan0mbim0) — that's where the data plane lives.
+ttyUSB0
+ttyUSB1
+ttyUSB2
+ttyUSB3
