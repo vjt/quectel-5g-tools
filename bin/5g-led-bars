@@ -61,7 +61,7 @@ local function best_nr_rsrp(ca)
     if not ca then return nil, nil end
     local best, best_src = nil, nil
     local function consider(c, src)
-        if c and c.rat == "nr5g" and c.rsrp then
+        if c and c.rat == "5g" and c.rsrp then
             if not best or c.rsrp > best then best, best_src = c.rsrp, src end
         end
     end
