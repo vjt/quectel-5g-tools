@@ -10,6 +10,7 @@ M.frequency = require("quectel.frequency")
 M.thresholds = require("quectel.thresholds")
 M.display = require("quectel.display")
 M.utils = require("quectel.utils")
+M.uci = require("quectel.uci")
 
 -- Module version
 M.VERSION = "1.0.0"
@@ -17,98 +18,62 @@ M.VERSION = "1.0.0"
 --- Load configuration from UCI
 -- @return Table with device, timeout, bands, etc.
 function M.load_config()
+    local uci = M.uci
+
     local config = {
-        device = "/dev/ttyUSB2",
-        timeout = 2,
-        beeps_enabled = true,
-        refresh_interval = 5,
-        lte_bands = nil,   -- nil = don't change, {} = all bands
+        device           = uci.get_string("quectel", "modem", "device", "/dev/ttyUSB2"),
+        timeout          = uci.get_number("quectel", "modem", "timeout", 2),
+        beeps_enabled    = uci.get_bool  ("quectel", "modem", "beeps_enabled", true),
+        refresh_interval = uci.get_number("quectel", "modem", "refresh_interval", 5),
+        lte_bands  = nil,   -- nil = don't change, {} = all bands
         nr5g_bands = nil,
-        lte_cells = nil,   -- nil = don't change, {} = clear locks
+        lte_cells  = nil,   -- nil = don't change, {} = clear locks
         nr5g_cells = nil,
     }
 
-    -- Try to load from UCI. Prefer libuci-lua's plain `uci` module (the C
-    -- binding shipped by `libuci-lua`); it's tiny and present on every
-    -- OpenWrt router. `luci.model.uci` is only available when luci-base is
-    -- installed, which we explicitly drop from our slim image — falling
-    -- back to it after the plain module makes the lib robust either way.
-    local ok, uci = pcall(require, "uci")
-    if not ok then
-        ok, uci = pcall(require, "luci.model.uci")
+    local lte = uci.get_list("quectel", "modem", "lte_bands")
+    if lte then
+        config.lte_bands = {}
+        for _, band in ipairs(lte) do
+            table.insert(config.lte_bands, tonumber(band))
+        end
     end
-    if ok then
-        local cursor = uci.cursor()
 
-        -- The shipped /etc/config/quectel uses `config modem 'modem'`
-        -- (named section). Try the named section first, then fall back
-        -- to the first unnamed section of type `modem` so a hand-edited
-        -- config still works.
-        local function get_opt(option)
-            local v = cursor:get("quectel", "modem", option)
-            if v ~= nil then return v end
-            local out
-            cursor:foreach("quectel", "modem", function(s)
-                if out == nil then out = s[option] end
-            end)
-            return out
+    local nr5g = uci.get_list("quectel", "modem", "nr5g_bands")
+    if nr5g then
+        config.nr5g_bands = {}
+        for _, band in ipairs(nr5g) do
+            table.insert(config.nr5g_bands, tonumber(band))
         end
+    end
 
-        local device = get_opt("device")
-        local timeout = get_opt("timeout")
-        local beeps = get_opt("beeps_enabled")
-        local refresh = get_opt("refresh_interval")
-        local lte = get_opt("lte_bands")
-        local nr5g = get_opt("nr5g_bands")
-
-        if device then config.device = device end
-        if timeout then config.timeout = tonumber(timeout) end
-        if beeps then config.beeps_enabled = (beeps == "1") end
-        if refresh then config.refresh_interval = tonumber(refresh) end
-
-        -- Band lists come as tables from UCI (list entries)
-        if lte and type(lte) == "table" then
-            config.lte_bands = {}
-            for _, band in ipairs(lte) do
-                table.insert(config.lte_bands, tonumber(band))
+    -- Cell lock lists (earfcn,pci pairs for LTE; pci,arfcn,scs,band for 5G)
+    local lte_cells = uci.get_list("quectel", "modem", "lte_cells")
+    if lte_cells then
+        config.lte_cells = {}
+        for _, entry in ipairs(lte_cells) do
+            local earfcn, pci = entry:match("^(%d+),(%d+)$")
+            if earfcn and pci then
+                table.insert(config.lte_cells, {
+                    earfcn = tonumber(earfcn),
+                    pci    = tonumber(pci),
+                })
             end
         end
-        if nr5g and type(nr5g) == "table" then
-            config.nr5g_bands = {}
-            for _, band in ipairs(nr5g) do
-                table.insert(config.nr5g_bands, tonumber(band))
-            end
-        end
+    end
 
-        -- Cell lock lists (earfcn,pci pairs for LTE; pci,arfcn,scs,band for 5G)
-        local lte_cells = get_opt("lte_cells")
-        local nr5g_cells = get_opt("nr5g_cells")
-
-        if lte_cells and type(lte_cells) == "table" then
-            config.lte_cells = {}
-            for _, entry in ipairs(lte_cells) do
-                local earfcn, pci = entry:match("^(%d+),(%d+)$")
-                if earfcn and pci then
-                    table.insert(config.lte_cells, {
-                        earfcn = tonumber(earfcn),
-                        pci = tonumber(pci),
-                    })
-                end
-            end
-        end
-
-        if nr5g_cells and type(nr5g_cells) == "table" then
-            config.nr5g_cells = {}
-            for _, entry in ipairs(nr5g_cells) do
-                local pci, arfcn, scs, band = entry:match("^(%d+),(%d+),(%d+),(%d+)$")
-                if pci and arfcn and scs and band then
-                    table.insert(config.nr5g_cells, {
-                        pci = tonumber(pci),
-                        arfcn = tonumber(arfcn),
-                        scs = tonumber(scs),
-                        band = tonumber(band),
-                    })
-                end
+    local nr5g_cells = uci.get_list("quectel", "modem", "nr5g_cells")
+    if nr5g_cells then
+        config.nr5g_cells = {}
+        for _, entry in ipairs(nr5g_cells) do
+            local pci, arfcn, scs, band = entry:match("^(%d+),(%d+),(%d+),(%d+)$")
+            if pci and arfcn and scs and band then
+                table.insert(config.nr5g_cells, {
+                    pci   = tonumber(pci),
+                    arfcn = tonumber(arfcn),
+                    scs   = tonumber(scs),
+                    band  = tonumber(band),
+                })
             end
         end
     end

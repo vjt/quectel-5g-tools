@@ -17,15 +17,6 @@ local LED_COUNT = 4
 -- RSRP (dBm) thresholds for bars 1..4. Bar N is lit when rsrp >= THRESHOLDS[N].
 local THRESHOLDS = { -115, -105, -95, -85 }
 
-local function uci_get(key)
-    local f = io.popen("uci -q get quectel." .. key .. " 2>/dev/null")
-    if not f then return nil end
-    local v = f:read("*l")
-    f:close()
-    if v == nil or v == "" then return nil end
-    return v
-end
-
 local function write_file(path, value)
     local f = io.open(path, "w")
     if not f then return end
@@ -90,7 +81,7 @@ local function read_rsrp()
     return nil
 end
 
-local interval = tonumber(uci_get("led_bars.interval")) or 10
+local interval = quectel.uci.get_number("quectel", "led_bars", "interval", 10)
 
 set_trigger_none()
 apply_bars(0)
