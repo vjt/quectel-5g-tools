@@ -72,6 +72,28 @@ local function best_nr_rsrp(ca)
     return best, best_src
 end
 
+-- Compact summary of the parsed status, used only on the failure path to
+-- give the operator a fighting chance of figuring out which piece of the
+-- modem reply went missing without re-running by hand. Cheap (just field
+-- reads) and bounded (no neighbours, no full dump).
+local function describe_carrier(c)
+    if not c then return "nil" end
+    return string.format("rat=%s,rsrp=%s,band=%s,arfcn=%s",
+        tostring(c.rat), tostring(c.rsrp),
+        tostring(c.band), tostring(c.arfcn))
+end
+
+local function summarize_status(status)
+    if not status then return "status=nil" end
+    local serving = status.serving or {}
+    local ca = status.ca or {}
+    return string.format(
+        "serving={state=%s,rat=%s,rsrp=%s} pcc={%s} scc=%d",
+        tostring(serving.state), tostring(serving.rat),
+        tostring(serving.rsrp), describe_carrier(ca.pcc),
+        ca.scc and #ca.scc or 0)
+end
+
 local function read_rsrp()
     local m = quectel.create_modem()
     local ok, status = pcall(function() return m:get_signal_status() end)
@@ -90,7 +112,7 @@ local function read_rsrp()
     if status.serving and status.serving.rsrp then
         return status.serving.rsrp, "serving"
     end
-    return nil, nil, "no rsrp in modem reply"
+    return nil, nil, "no rsrp in modem reply (" .. summarize_status(status) .. ")"
 end
 
 local interval = quectel.uci.get_number("quectel", "led_bars", "interval", 10)
