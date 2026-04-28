@@ -15,7 +15,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=5
+PKG_RELEASE:=6
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/vjt/quectel-5g-tools.git
@@ -102,6 +102,10 @@ define Package/quectel-5g-tools/install
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/init.d/5g-led-bars $(1)/etc/init.d/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/init.d/mbim-watchdog $(1)/etc/init.d/
+
+	# Install uci-defaults (runs once on first boot; see file header)
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/uci-defaults/95-5g-led-bars $(1)/etc/uci-defaults/
 
 	# Install UCI config
 	$(INSTALL_DIR) $(1)/etc/config

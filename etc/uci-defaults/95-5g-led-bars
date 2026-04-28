@@ -1,0 +1,35 @@
+#!/bin/sh
+# Disable the netdev triggers on the four panel signal LEDs so the
+# 5g-led-bars daemon can drive their brightness directly from RSRP.
+#
+# The mediatek/filogic board.d/01_leds default for the GL-X3000 wires
+# green:5g:led{1..4} to a netdev trigger on wwan0 with mode "link tx rx".
+# That gives binary all-on / all-off behaviour: the moment the modem
+# interface has carrier the bars peg at 4/4 regardless of actual signal.
+# The 5g-led-bars init script re-asserts trigger=none on every poll
+# anyway, so without this defaults file a `service system reload`
+# would briefly flip the triggers back to netdev and clobber a few
+# brightness writes between the reload and the next 5g-led-bars tick.
+#
+# Sections themselves are kept (not deleted) — that way someone who
+# disables 5g-led-bars and wants to revert to netdev can just
+# `uci set system.led_5g_1.trigger=netdev` etc., without having to
+# remember the original mode/dev fields.
+
+[ -f /etc/config/system ] || exit 0
+
+changed=0
+for n in 1 2 3 4; do
+    section="led_5g_$n"
+    [ -n "$(uci -q get system.$section)" ] || continue
+    [ "$(uci -q get system.$section.trigger)" = "none" ] && continue
+
+    uci -q set system.$section.trigger='none'
+    uci -q delete system.$section.mode
+    uci -q delete system.$section.dev
+    changed=1
+done
+
+[ "$changed" = 1 ] && uci commit system
+
+exit 0
