@@ -100,6 +100,7 @@ local function main_loop()
         if not ok then
             status = {}
         end
+        modem:close()
 
         -- Clear screen and move cursor home, hide cursor
         io.write(display.CLEAR .. display.HOME .. display.HIDE_CURSOR)
