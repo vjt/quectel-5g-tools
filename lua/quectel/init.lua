@@ -28,16 +28,38 @@ function M.load_config()
         nr5g_cells = nil,
     }
 
-    -- Try to load from UCI
-    local ok, uci = pcall(require, "luci.model.uci")
+    -- Try to load from UCI. Prefer libuci-lua's plain `uci` module (the C
+    -- binding shipped by `libuci-lua`); it's tiny and present on every
+    -- OpenWrt router. `luci.model.uci` is only available when luci-base is
+    -- installed, which we explicitly drop from our slim image — falling
+    -- back to it after the plain module makes the lib robust either way.
+    local ok, uci = pcall(require, "uci")
+    if not ok then
+        ok, uci = pcall(require, "luci.model.uci")
+    end
     if ok then
         local cursor = uci.cursor()
-        local device = cursor:get("quectel", "@modem[0]", "device")
-        local timeout = cursor:get("quectel", "@modem[0]", "timeout")
-        local beeps = cursor:get("quectel", "@modem[0]", "beeps_enabled")
-        local refresh = cursor:get("quectel", "@modem[0]", "refresh_interval")
-        local lte = cursor:get("quectel", "@modem[0]", "lte_bands")
-        local nr5g = cursor:get("quectel", "@modem[0]", "nr5g_bands")
+
+        -- The shipped /etc/config/quectel uses `config modem 'modem'`
+        -- (named section). Try the named section first, then fall back
+        -- to the first unnamed section of type `modem` so a hand-edited
+        -- config still works.
+        local function get_opt(option)
+            local v = cursor:get("quectel", "modem", option)
+            if v ~= nil then return v end
+            local out
+            cursor:foreach("quectel", "modem", function(s)
+                if out == nil then out = s[option] end
+            end)
+            return out
+        end
+
+        local device = get_opt("device")
+        local timeout = get_opt("timeout")
+        local beeps = get_opt("beeps_enabled")
+        local refresh = get_opt("refresh_interval")
+        local lte = get_opt("lte_bands")
+        local nr5g = get_opt("nr5g_bands")
 
         if device then config.device = device end
         if timeout then config.timeout = tonumber(timeout) end
@@ -59,8 +81,8 @@ function M.load_config()
         end
 
         -- Cell lock lists (earfcn,pci pairs for LTE; pci,arfcn,scs,band for 5G)
-        local lte_cells = cursor:get("quectel", "@modem[0]", "lte_cells")
-        local nr5g_cells = cursor:get("quectel", "@modem[0]", "nr5g_cells")
+        local lte_cells = get_opt("lte_cells")
+        local nr5g_cells = get_opt("nr5g_cells")
 
         if lte_cells and type(lte_cells) == "table" then
             config.lte_cells = {}
