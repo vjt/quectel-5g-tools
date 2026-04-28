@@ -17,6 +17,13 @@ local LED_COUNT = 4
 -- RSRP (dBm) thresholds for bars 1..4. Bar N is lit when rsrp >= THRESHOLDS[N].
 local THRESHOLDS = { -115, -105, -95, -85 }
 
+-- procd init script sets stdout/stderr=1, so anything we write here gets
+-- picked up by ulog → syslog. Tag every line so logread filters cleanly.
+local function log(fmt, ...)
+    io.stderr:write(string.format("5g-led-bars: " .. fmt .. "\n", ...))
+    io.stderr:flush()
+end
+
 local function write_file(path, value)
     local f = io.open(path, "w")
     if not f then return end
@@ -51,40 +58,53 @@ end
 -- the strongest NR carrier (PCC or any NR SCC); fall back to PCC RSRP
 -- if there are no NR carriers (pure-LTE attach).
 local function best_nr_rsrp(ca)
-    if not ca then return nil end
-    local best = nil
-    local function consider(c)
+    if not ca then return nil, nil end
+    local best, best_src = nil, nil
+    local function consider(c, src)
         if c and c.rat == "nr5g" and c.rsrp then
-            if not best or c.rsrp > best then best = c.rsrp end
+            if not best or c.rsrp > best then best, best_src = c.rsrp, src end
         end
     end
-    consider(ca.pcc)
-    for _, scc in ipairs(ca.scc or {}) do consider(scc) end
-    return best
+    consider(ca.pcc, "PCC")
+    for i, scc in ipairs(ca.scc or {}) do
+        consider(scc, "SCC[" .. i .. "]")
+    end
+    return best, best_src
 end
 
 local function read_rsrp()
     local m = quectel.create_modem()
     local ok, status = pcall(function() return m:get_signal_status() end)
     pcall(function() m:close() end)
-    if not ok or not status then return nil end
+    if not ok or not status then
+        local err = (not ok and tostring(status)) or "no status"
+        return nil, nil, err
+    end
 
-    local nr = best_nr_rsrp(status.ca)
-    if nr then return nr end
+    local nr, src = best_nr_rsrp(status.ca)
+    if nr then return nr, "NR " .. src end
 
     if status.ca and status.ca.pcc and status.ca.pcc.rsrp then
-        return status.ca.pcc.rsrp
+        return status.ca.pcc.rsrp, "LTE PCC"
     end
     if status.serving and status.serving.rsrp then
-        return status.serving.rsrp
+        return status.serving.rsrp, "serving"
     end
-    return nil
+    return nil, nil, "no rsrp in modem reply"
 end
 
 local interval = quectel.uci.get_number("quectel", "led_bars", "interval", 10)
+local device_for_log = quectel.uci.get_string("quectel", "modem", "device",
+                                              "/dev/ttyUSB2")
+
+log("starting: device=%s interval=%ds thresholds=[%s] dBm",
+    device_for_log, interval, table.concat(THRESHOLDS, ","))
 
 set_trigger_none()
 apply_bars(0)
+
+local last_bars = 0
+local consecutive_failures = 0
 
 -- Re-asserting trigger=none on every cycle is cheap (4 sysfs writes) and
 -- guards against `/etc/init.d/system reload` (or any external re-apply
@@ -98,9 +118,30 @@ apply_bars(0)
 -- when nothing's actually wrong with the link.
 while true do
     set_trigger_none()
-    local rsrp = read_rsrp()
+    local rsrp, src, err = read_rsrp()
     if rsrp then
-        apply_bars(rsrp_to_bars(rsrp))
+        local bars = rsrp_to_bars(rsrp)
+        apply_bars(bars)
+        if bars ~= last_bars or consecutive_failures > 0 then
+            log("rsrp=%d dBm (%s) -> %d bars%s",
+                rsrp, src, bars,
+                consecutive_failures > 0 and
+                    string.format(" (recovered after %d failed reads)",
+                                  consecutive_failures) or "")
+        end
+        last_bars = bars
+        consecutive_failures = 0
+    else
+        consecutive_failures = consecutive_failures + 1
+        -- Log every miss for the first few, then back off to avoid spam if
+        -- the modem stays unreachable. 1, 2, 5, 10, 30, 60, 120, …
+        if consecutive_failures == 1
+           or consecutive_failures == 2
+           or consecutive_failures == 5
+           or consecutive_failures % 30 == 0 then
+            log("rsrp read failed (%s); holding %d bars (miss #%d)",
+                err or "unknown", last_bars, consecutive_failures)
+        end
     end
     utils.sleep(interval)
 end

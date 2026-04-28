@@ -27,7 +27,19 @@ static gchar *opt_iface = NULL;
 static gint64 last_ifup_us;
 static gboolean ifup_pending = FALSE;
 
+/* Counters surfaced via the periodic heartbeat so a `logread -f` consumer
+ * can see at a glance whether the daemon is actually receiving traffic
+ * from the modem or just sitting on a dead control channel. */
+static guint64  total_indications;
+static guint64  connect_indications;
+static guint64  ifup_runs;
+static gint64   started_us;
+static gint64   last_indication_us;
+
 static void open_device (void);
+static void on_connect_indication (MbimDevice *dev,
+                                   MbimMessage *message,
+                                   gpointer user_data);
 
 static GOptionEntry option_entries[] = {
     { "device", 'd', 0, G_OPTION_ARG_FILENAME, &opt_device,
@@ -54,6 +66,7 @@ do_ifup_and_reopen (gpointer user_data)
     GError *error = NULL;
     gint exit_status = 0;
 
+    gint64 t0 = g_get_monotonic_time ();
     g_message ("Running: ifup %s", opt_iface);
     if (!g_spawn_sync (NULL, argv, NULL,
                        G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
@@ -61,9 +74,16 @@ do_ifup_and_reopen (gpointer user_data)
         g_warning ("ifup spawn failed: %s", error->message);
         g_clear_error (&error);
     } else if (exit_status != 0) {
-        g_warning ("ifup exited with status %d", exit_status);
+        g_warning ("ifup exited with status %d (%lds elapsed)",
+                   exit_status,
+                   (long)((g_get_monotonic_time () - t0) / G_USEC_PER_SEC));
+    } else {
+        g_message ("ifup %s completed in %lds, reopening MBIM device",
+                   opt_iface,
+                   (long)((g_get_monotonic_time () - t0) / G_USEC_PER_SEC));
     }
 
+    ifup_runs++;
     ifup_pending = FALSE;
     open_device ();
     return G_SOURCE_REMOVE;
@@ -94,14 +114,12 @@ trigger_ifup (void)
     g_idle_add (do_ifup_and_reopen, NULL);
 }
 
+/* Forward-declared above; full body here. Renamed to make the routing
+ * boundary obvious — `on_indicate_status` is the catch-all and this is
+ * the BASIC_CONNECT/CONNECT-specific handler it dispatches to. */
 static void
-on_indicate_status (MbimDevice *dev, MbimMessage *message, gpointer user_data)
+on_connect_indication (MbimDevice *dev, MbimMessage *message, gpointer user_data)
 {
-    if (mbim_message_indicate_status_get_service (message) != MBIM_SERVICE_BASIC_CONNECT)
-        return;
-    if (mbim_message_indicate_status_get_cid (message) != MBIM_CID_BASIC_CONNECT_CONNECT)
-        return;
-
     guint32 session_id = 0;
     MbimActivationState activation_state = MBIM_ACTIVATION_STATE_UNKNOWN;
     const MbimUuid *context_type = NULL;
@@ -128,11 +146,67 @@ on_indicate_status (MbimDevice *dev, MbimMessage *message, gpointer user_data)
                mbim_context_type_get_string (mbim_uuid_to_context_type (context_type)),
                nw_error);
 
-    if (activation_state == MBIM_ACTIVATION_STATE_DEACTIVATED &&
+    /* Fire on both DEACTIVATED and DEACTIVATING. Quectel's RM520N firmware
+     * only emits the DEACTIVATING transition for carrier-side teardowns —
+     * there's no follow-up DEACTIVATED indication to wait for, so checking
+     * the final state alone leaves us stuck. ACTIVATING is the harmless
+     * inverse and we ignore it; ACTIVATED + UNKNOWN say nothing's wrong. */
+    if ((activation_state == MBIM_ACTIVATION_STATE_DEACTIVATED ||
+         activation_state == MBIM_ACTIVATION_STATE_DEACTIVATING) &&
         mbim_uuid_to_context_type (context_type) == MBIM_CONTEXT_TYPE_INTERNET) {
-        g_message ("Internet context deactivated, triggering ifup %s", opt_iface);
+        g_message ("Internet context %s, triggering ifup %s",
+                   mbim_activation_state_get_string (activation_state),
+                   opt_iface);
         trigger_ifup ();
     }
+}
+
+/* Log every indication we observe, not just BASIC_CONNECT/CONNECT.
+ * Helps confirm the proxy is actually delivering events when the
+ * carrier is quiet for hours and there's nothing else to look at. */
+static void
+on_indicate_status (MbimDevice *dev, MbimMessage *message, gpointer user_data)
+{
+    MbimService service = mbim_message_indicate_status_get_service (message);
+    guint32 cid = mbim_message_indicate_status_get_cid (message);
+
+    total_indications++;
+    last_indication_us = g_get_monotonic_time ();
+
+    if (service == MBIM_SERVICE_BASIC_CONNECT &&
+        cid == MBIM_CID_BASIC_CONNECT_CONNECT) {
+        connect_indications++;
+        on_connect_indication (dev, message, user_data);
+        return;
+    }
+
+    g_debug ("Indication received: service=%s cid=%u",
+             mbim_service_get_string (service), cid);
+}
+
+/* Periodic heartbeat. Lets `logread` confirm the watchdog is alive even
+ * when the carrier is silent — without this, a wedged daemon (proxy
+ * fd half-closed, indication path stalled) is indistinguishable from
+ * a happy daemon waiting for an event. */
+static gboolean
+on_heartbeat (gpointer user_data)
+{
+    gint64 now = g_get_monotonic_time ();
+    if (last_indication_us == 0) {
+        g_message ("alive: uptime=%lds, %lu indications (%lu connect), %lu ifup runs, no indications yet",
+                   (long)((now - started_us) / G_USEC_PER_SEC),
+                   (unsigned long)total_indications,
+                   (unsigned long)connect_indications,
+                   (unsigned long)ifup_runs);
+    } else {
+        g_message ("alive: uptime=%lds, %lu indications (%lu connect), %lu ifup runs, last indication %lds ago",
+                   (long)((now - started_us) / G_USEC_PER_SEC),
+                   (unsigned long)total_indications,
+                   (unsigned long)connect_indications,
+                   (unsigned long)ifup_runs,
+                   (long)((now - last_indication_us) / G_USEC_PER_SEC));
+    }
+    return G_SOURCE_CONTINUE;
 }
 
 static void
@@ -207,9 +281,19 @@ main (int argc, char *argv[])
     if (!opt_iface)
         opt_iface = g_strdup ("wwan");
 
+    started_us = g_get_monotonic_time ();
+    g_message ("starting: device=%s iface=%s ifup_cooldown=%ds heartbeat=%ds",
+               opt_device, opt_iface,
+               IFUP_COOLDOWN_USEC / G_USEC_PER_SEC,
+               60);
+
     loop = g_main_loop_new (NULL, FALSE);
     g_unix_signal_add (SIGINT,  on_signal, NULL);
     g_unix_signal_add (SIGTERM, on_signal, NULL);
+
+    /* 60s heartbeat — frequent enough that an idle log tail catches the
+     * daemon's pulse, infrequent enough that it doesn't dominate logread. */
+    g_timeout_add_seconds (60, on_heartbeat, NULL);
 
     open_device ();
 
