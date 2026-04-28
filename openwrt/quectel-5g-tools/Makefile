@@ -15,7 +15,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=14
+PKG_RELEASE:=15
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/vjt/quectel-5g-tools.git
@@ -86,9 +86,11 @@ define Package/quectel-5g-tools/install
 	$(INSTALL_DIR) $(1)/etc/modemmanager
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/config/mm-ignore-tty $(1)/etc/modemmanager/ignore-tty
 
-	# Install uci-defaults (runs once on first boot; see file header)
+	# Install uci-defaults (each runs once on first boot; see file headers).
+	# Glob so new files added to etc/uci-defaults/ in the source tree get
+	# picked up without having to remember to update the install recipe.
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/uci-defaults/95-5g-led-bars $(1)/etc/uci-defaults/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/uci-defaults/* $(1)/etc/uci-defaults/
 
 	# Install UCI config
 	$(INSTALL_DIR) $(1)/etc/config
