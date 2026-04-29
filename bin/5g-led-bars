@@ -98,6 +98,7 @@ local function read_rsrp()
     local m = quectel.create_modem()
     local ok, status = pcall(function() return m:get_signal_status() end)
     pcall(function() m:close() end)
+
     if not ok or not status then
         local err = (not ok and tostring(status)) or "no status"
         return nil, nil, err
@@ -144,7 +145,7 @@ while true do
     if rsrp then
         local bars = rsrp_to_bars(rsrp)
         apply_bars(bars)
-        if bars ~= last_bars or consecutive_failures > 0 then
+        if consecutive_failures > 0 then
             log("rsrp=%d dBm (%s) -> %d bars%s",
                 rsrp, src, bars,
                 consecutive_failures > 0 and
@@ -156,13 +157,24 @@ while true do
     else
         consecutive_failures = consecutive_failures + 1
         -- Log every miss for the first few, then back off to avoid spam if
-        -- the modem stays unreachable. 1, 2, 5, 10, 30, 60, 120, …
+        -- the modem stays unreachable.
         if consecutive_failures == 1
            or consecutive_failures == 2
            or consecutive_failures == 5
-           or consecutive_failures % 30 == 0 then
+           or consecutive_failures == 10 then
             log("rsrp read failed (%s); holding %d bars (miss #%d)",
                 err or "unknown", last_bars, consecutive_failures)
+        else
+            apply_bars(0)
+            if consecutive_failures == 12 then
+                log("rsrp read failed (%s); reset bars to 0 (miss #%d)",
+                err or "unknown", consecutive_failures)
+            end
+
+            if consecutive_failures % 30 == 0 then
+                log("rsrp read failed (%s); (miss #%d)",
+                err or "unknown", consecutive_failures)
+            end
         end
     end
     utils.sleep(interval)
