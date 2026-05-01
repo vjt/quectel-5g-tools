@@ -33,6 +33,8 @@ local function scrape()
     local function num(key) return tonumber(s[key]) or 0 end
 
     local nr_attached       = metric("quectel_watchdog_nr_attached", "gauge")
+    local nr_carriers       = metric("quectel_watchdog_nr_carriers", "gauge")
+    local lte_carriers      = metric("quectel_watchdog_lte_carriers", "gauge")
     local nr_capable        = metric("quectel_watchdog_nr_capable", "gauge")
     local connected         = metric("quectel_watchdog_connected", "gauge")
     local consecutive       = metric("quectel_watchdog_consecutive_degraded_samples", "gauge")
@@ -46,6 +48,8 @@ local function scrape()
     local updated           = metric("quectel_watchdog_updated_timestamp_seconds", "gauge")
 
     nr_attached({}, num("nr_attached"))
+    nr_carriers({}, num("nr_carriers"))
+    lte_carriers({}, num("lte_carriers"))
     nr_capable({}, num("nr_capable"))
     connected({}, num("connected"))
     consecutive({}, num("consecutive_degraded"))

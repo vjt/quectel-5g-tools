@@ -15,14 +15,33 @@
 -- After two failed stages in a row the watchdog stops trying and
 -- flags `capped=1` for Prometheus to alert on.
 --
--- All modem reads go through `mmcli -J` (machine-readable JSON). No AT
--- serial contention, nothing fights MM for ownership of the modem.
+-- All probe data — connected state, NR carrier count, mode preference —
+-- comes straight from the modem over AT via the shared `quectel.modem`
+-- Lua lib (AT+QCAINFO for the carrier-agg state, AT+QNWPREFCFG for the
+-- mode preference). mmcli's QMI-derived views (`access-technologies`,
+-- `current-modes`) are kept out of probe because they lie for NSA: they
+-- keep reporting `5gnr` after the SCG dropped, which is exactly the
+-- failure mode we're trying to detect.
+--
+-- mmcli is still used for the *recovery* actions (--disable / --enable,
+-- and AT-based mode toggle as fallback) since MM owns the bearer and
+-- needs to be the one driving disconnect/reconnect — going around it
+-- would leave MM out of sync with the radio.
+--
+-- AT bus contention is not a problem: the rest of quectel-5g-tools
+-- (5g-info, 5g-monitor, 5g-led-bars) shares the same AT port via
+-- /var/lock/quectel-modem.lock with a bounded poll-retry loop, so the
+-- watchdog just queues behind whichever helper is talking to the modem.
 
 package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 
 local quectel_uci = require("quectel.uci")
 local utils = require("quectel.utils")
+local Modem = require("quectel.modem")
 local jsonc = require("luci.jsonc")
+
+local AT_DEVICE = quectel_uci.get_string("quectel", "modem", "device", "/dev/ttyUSB2")
+local AT_TIMEOUT = 5  -- seconds; lock-retry poll inside Modem:open() handles contention
 
 local STATE_PATH = "/var/run/5g-watchdog.state"
 local RECOVERY_POLL_INTERVAL = 3   -- seconds between mmcli polls while waiting for NR
@@ -124,87 +143,92 @@ local function stage1_disable_enable(idx)
     end
 end
 
--- Stage 2: record the current allowed-modes+preferred-mode, drop to
--- 4g-only, then restore exactly. We restore in a pcall-style ordering
--- so even if the second mmcli call fails, the daemon will retry the
--- restore on the next poll (state file flags "capped" so the user can
--- see something is wrong from Prometheus).
-local function stage2_mode_toggle(idx, allowed_csv, preferred)
-    -- mmcli expects pipe-separated mode lists; we keep CSV in state file
-    -- for human/Prometheus readability, so convert at the call site.
-    local allowed_pipes = (allowed_csv or ""):gsub(",", "|")
-    if allowed_pipes == "" then
-        log("stage2: refusing to run, no current allowed modes captured")
+-- Stage 2: drop the modem's mode preference to LTE-only via
+-- AT+QNWPREFCFG="mode_pref", wait, then restore it to whatever it was
+-- before. The mode-pref flip forces the firmware to drop NR
+-- measurements and restart them clean — the heaviest lever we have
+-- short of an attach toggle. We do this over AT (not mmcli) because the
+-- mmcli surface for "current-modes" is the same QMI registration view
+-- that lies about NSA SCG state, and going through AT keeps the radio
+-- and the firmware in sync without involving MM's caching at all.
+--
+-- If the restore call fails the daemon will retry on the next probe
+-- (state file flags `capped` so Prometheus picks it up).
+local function stage2_mode_toggle(prev_mode_pref)
+    if not prev_mode_pref or prev_mode_pref == "" then
+        log("stage2: refusing to run, no mode_pref captured")
         return false
     end
-    local restore = string.format(
-        "mmcli -m %d --set-allowed-modes='%s'%s",
-        idx, allowed_pipes,
-        (preferred and preferred ~= "" and preferred ~= "none")
-            and (" --set-preferred-mode=" .. preferred) or "")
-    log("stage2: drop to 4g, then restore: %s", restore)
-
-    local _, c1 = run(string.format("mmcli -m %d --set-allowed-modes='4g'", idx))
+    log("stage2: AT mode_pref drop to LTE, then restore to %s", prev_mode_pref)
+    local m = Modem.new(AT_DEVICE, AT_TIMEOUT)
+    local ok, err = m:open()
+    if not ok then
+        log("stage2: modem open failed: %s", tostring(err))
+        return false
+    end
+    local _, drop_err = m:set_mode_pref("LTE")
     utils.sleep(4)
-    local _, c2 = run(restore)
-    if c1 ~= 0 or c2 ~= 0 then
-        log("stage2: drop=%d restore=%d (non-zero) — restore cmd: %s",
-            c1, c2, restore)
+    local _, restore_err = m:set_mode_pref(prev_mode_pref)
+    m:close()
+    if drop_err or restore_err then
+        log("stage2: drop_err=%s restore_err=%s",
+            tostring(drop_err or "ok"), tostring(restore_err or "ok"))
         return false
     end
     return true
 end
 
 -- ---------------------------------------------------------------------
--- detection
+-- detection (all-AT)
 -- ---------------------------------------------------------------------
 
--- mmcli serialises `current-modes` as a single human-readable string
--- of the form "allowed: 3g, 4g, 5g; preferred: 5g" — the `-J` flag
--- does NOT split it into structured fields, so this stays a string
--- parse. Returns (allowed_list, preferred_string).
-local function parse_current_modes(s)
-    if not s or s == "" or s == "--" then return {}, "" end
-    local allowed_part, preferred = s:match("^%s*allowed:%s*(.-)%s*;%s*preferred:%s*(.-)%s*$")
-    if not allowed_part then
-        -- some mmcli versions omit the preferred half on single-mode setups
-        allowed_part = s:match("^%s*allowed:%s*(.-)%s*$") or s
-        preferred = ""
+local function probe()
+    -- One open/close per probe — both AT calls share the lock so we
+    -- only contend with the rest of quectel-5g-tools once.
+    local m = Modem.new(AT_DEVICE, AT_TIMEOUT)
+    local ok, err = m:open()
+    if not ok then return nil, "modem open: " .. tostring(err) end
+    local sig, sig_err = m:get_signal_status()
+    if not sig then
+        m:close()
+        return nil, "get_signal_status: " .. tostring(sig_err)
     end
-    local list = {}
-    for m in allowed_part:gmatch("[^,%s]+") do table.insert(list, m) end
-    return list, preferred or ""
-end
+    -- get_band_config("mode_pref") issues AT+QNWPREFCFG="mode_pref" and
+    -- returns the raw value (e.g. "AUTO", "LTE", "NR5G", "LTE:NR5G").
+    local mode_pref = m:get_band_config("mode_pref") or ""
+    m:close()
 
-local function probe(idx)
-    local data, code = run_json(string.format("mmcli -m %d -J", idx))
-    if not data or type(data.modem) ~= "table" then
-        return nil, "mmcli -J failed (code=" .. tostring(code) .. ")"
-    end
-    local g = data.modem.generic or {}
-    local state = g.state or "unknown"
-    local techs = {}
-    if type(g["access-technologies"]) == "table" then
-        for _, t in ipairs(g["access-technologies"]) do
-            if t ~= "--" then table.insert(techs, t) end
+    -- Carrier aggregation breakdown: pcc + scc[] each tagged with
+    -- rat="lte"|"5g". This is the modem's own view, the only one that
+    -- reflects whether NR is actually being aggregated on the bearer.
+    local nr_carriers, lte_carriers = 0, 0
+    local has_pcc = false
+    if sig.ca then
+        if sig.ca.pcc then
+            has_pcc = true
+            if sig.ca.pcc.rat == "5g" then nr_carriers = nr_carriers + 1
+            else lte_carriers = lte_carriers + 1 end
+        end
+        for _, c in ipairs(sig.ca.scc or {}) do
+            if c.rat == "5g" then nr_carriers = nr_carriers + 1
+            else lte_carriers = lte_carriers + 1 end
         end
     end
-    local allowed, preferred = parse_current_modes(g["current-modes"])
 
-    local has_nr = false
-    for _, t in ipairs(techs) do if t == "5gnr" then has_nr = true break end end
-
-    local nr_capable = false
-    for _, m in ipairs(allowed) do if m == "5g" then nr_capable = true break end end
+    mode_pref = tostring(mode_pref):upper()
+    -- nr_capable: the radio is configured to attempt NR. AUTO covers
+    -- "use whatever's available"; otherwise the explicit list must
+    -- include NR5G.
+    local nr_capable = (mode_pref == "AUTO") or (mode_pref:find("NR5G") ~= nil)
 
     return {
-        state = state,
-        nr_attached = has_nr,
-        nr_capable = nr_capable,
-        connected = (state == "connected"),
-        allowed_csv = table.concat(allowed, ","),
-        preferred = preferred,
-        techs_csv = table.concat(techs, ","),
+        connected      = has_pcc,
+        state          = has_pcc and "connected" or "no-carrier",
+        nr_attached    = (nr_carriers > 0),
+        nr_carriers    = nr_carriers,
+        lte_carriers   = lte_carriers,
+        nr_capable     = nr_capable,
+        mode_pref      = mode_pref,
     }
 end
 
@@ -224,20 +248,26 @@ local cooldown_seconds  = quectel_uci.get_number("quectel", "watchdog", "cooldow
 local daily_cap         = quectel_uci.get_number("quectel", "watchdog", "daily_cap", 6)
 local stage2_enabled    = quectel_uci.get_bool("quectel", "watchdog", "enable_mode_toggle", true)
 
-log("starting up: looking for modem via ModemManager")
+log("starting up: probing modem over AT (%s)", AT_DEVICE)
 
-local idx = discover_modem_index()
-if not idx then
-    log("no modem visible to ModemManager; sleeping 30s and retrying")
+-- Sanity check: can we reach the modem at all? If not, sleep + retry
+-- once; if still bad, exit and let procd respawn us. This also catches
+-- the case where the lock file is held by a wedged 5g-info / 5g-monitor
+-- process across the whole startup window.
+local first_p, first_err = probe()
+if not first_p then
+    log("modem unreachable over AT (%s); sleeping 30s and retrying",
+        first_err or "?")
     utils.sleep(30)
-    idx = discover_modem_index()
-    if not idx then
-        log("still no modem; exiting (procd will respawn)")
+    first_p, first_err = probe()
+    if not first_p then
+        log("modem still unreachable (%s); exiting (procd will respawn)",
+            first_err or "?")
         os.exit(1)
     end
 end
-log("started: modem=%d poll=%ds hysteresis=%d cooldown=%ds daily_cap=%d stage2=%s",
-    idx, poll_interval, degraded_samples, cooldown_seconds, daily_cap,
+log("started: poll=%ds hysteresis=%d cooldown=%ds daily_cap=%d stage2=%s",
+    poll_interval, degraded_samples, cooldown_seconds, daily_cap,
     stage2_enabled and "on" or "off")
 
 local consecutive_degraded = 0
@@ -264,12 +294,12 @@ end
 local function emit_state(p)
     local s = {
         nr_attached            = (p and p.nr_attached) and 1 or 0,
+        nr_carriers            = p and p.nr_carriers or 0,
+        lte_carriers           = p and p.lte_carriers or 0,
         nr_capable             = (p and p.nr_capable) and 1 or 0,
         connected              = (p and p.connected) and 1 or 0,
         modem_state            = p and p.state or "unknown",
-        techs                  = p and p.techs_csv or "",
-        allowed_modes          = p and p.allowed_csv or "",
-        preferred_mode         = p and p.preferred or "",
+        mode_pref              = p and p.mode_pref or "",
         consecutive_degraded   = consecutive_degraded,
         cooldown_until         = cooldown_until,
         last_action_ts         = last_action_ts,
@@ -281,7 +311,6 @@ local function emit_state(p)
         consecutive_failed_actions   = consecutive_failed_actions,
         capped                 = capped and 1 or 0,
         updated_ts             = os.time(),
-        modem_index            = idx,
     }
     write_state(s)
 end
@@ -293,12 +322,12 @@ local function measure_recovery()
     local t0 = os.time()
     while os.time() - t0 < RECOVERY_MAX_WAIT do
         utils.sleep(RECOVERY_POLL_INTERVAL)
-        local p = probe(idx)
+        local p = probe()
         if p and p.nr_attached then
             return os.time() - t0, p
         end
     end
-    return RECOVERY_MAX_WAIT + 1, probe(idx)
+    return RECOVERY_MAX_WAIT + 1, probe()
 end
 
 local function take_action()
@@ -313,8 +342,8 @@ local function take_action()
     end
     capped = false
 
-    -- Snapshot modes for stage 2 restore (in case we need it).
-    local pre = probe(idx)
+    -- Snapshot mode_pref for stage 2 restore (in case we need it).
+    local pre = probe()
     if not pre then
         log("probe failed before action; skipping this round")
         return
@@ -323,10 +352,20 @@ local function take_action()
     local stage
     if consecutive_failed_actions == 0 or not stage2_enabled then
         stage = "disable_enable"
-        stage1_disable_enable(idx)
+        -- Stage 1 still goes through MM so the bearer manager stays in
+        -- sync — but the MM modem index can change at runtime (USB reset
+        -- / udev re-enum / firmware reboot), so we rediscover on every
+        -- action instead of caching.
+        local mm_idx = discover_modem_index()
+        if mm_idx then
+            stage1_disable_enable(mm_idx)
+        else
+            log("stage1: no modem visible to ModemManager; skipping action")
+            return
+        end
     else
         stage = "mode_toggle"
-        local ok = stage2_mode_toggle(idx, pre.allowed_csv, pre.preferred)
+        local ok = stage2_mode_toggle(pre.mode_pref)
         if not ok then
             log("stage2 reported a non-zero exit; will retry restore on next pass")
         end
@@ -367,28 +406,15 @@ local first_pass = true
 
 local function probe_summary(p)
     if not p then return "probe=nil" end
-    return string.format("state=%s connected=%s nr_capable=%s nr_attached=%s techs=[%s] modes=[%s] preferred=%s",
-        p.state, tostring(p.connected), tostring(p.nr_capable),
-        tostring(p.nr_attached), p.techs_csv, p.allowed_csv, p.preferred)
+    return string.format(
+        "state=%s nr_capable=%s nr_attached=%s nr_carriers=%d lte_carriers=%d mode_pref=%s",
+        p.state, tostring(p.nr_capable),
+        tostring(p.nr_attached), p.nr_carriers or 0, p.lte_carriers or 0,
+        p.mode_pref or "")
 end
 
 while true do
-    local p, err = probe(idx)
-    if not p then
-        -- Modem may have moved to a different ModemManager index (USB
-        -- reset, modem firmware reboot, udev re-enumeration). Without
-        -- rediscovery we'd probe a dead index forever even after the
-        -- kernel sees the modem come back. Try `mmcli -L` again; if it
-        -- gives us a different index, switch and retry the probe in
-        -- this same tick rather than waiting a full poll interval.
-        local new_idx = discover_modem_index()
-        if new_idx and new_idx ~= idx then
-            log("modem index changed: %d -> %d (was probing a dead index)", idx, new_idx)
-            idx = new_idx
-            last_probe = nil  -- old transitions don't apply to a new modem
-            p, err = probe(idx)
-        end
-    end
+    local p, err = probe()
     if not p then
         if last_probe_err ~= err then
             log("probe error: %s", err or "?")
@@ -408,9 +434,9 @@ while true do
                     log("modem state: %s -> %s", last_probe.state, p.state)
                 end
                 if last_probe.nr_capable ~= p.nr_capable then
-                    log("nr_capable: %s -> %s (allowed modes: [%s] preferred=%s)",
+                    log("nr_capable: %s -> %s (mode_pref=%s)",
                         tostring(last_probe.nr_capable), tostring(p.nr_capable),
-                        p.allowed_csv, p.preferred)
+                        p.mode_pref or "")
                 end
                 if last_probe.nr_attached ~= p.nr_attached then
                     if p.nr_attached then
@@ -441,8 +467,8 @@ while true do
             consecutive_degraded = consecutive_degraded + 1
             local now = os.time()
             local in_cooldown = now < cooldown_until
-            log("degraded sample %d/%d (techs=[%s])%s",
-                consecutive_degraded, degraded_samples, p.techs_csv,
+            log("degraded sample %d/%d (nr_carriers=%d)%s",
+                consecutive_degraded, degraded_samples, p.nr_carriers or 0,
                 in_cooldown and string.format(" — cooldown active for another %ds", cooldown_until - now) or "")
             if consecutive_degraded == degraded_samples then
                 if in_cooldown then

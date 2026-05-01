@@ -14,7 +14,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
-PKG_VERSION:=1.2.2
+PKG_VERSION:=1.2.3
 PKG_RELEASE:=0
 
 PKG_SOURCE_PROTO:=git
