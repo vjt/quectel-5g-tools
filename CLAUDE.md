@@ -10,18 +10,22 @@ The goal is to extract signal information from the modem to aid accurate pointin
 
 - `lua/quectel/` - Core library for modem communication and AT command parsing
 - `lua/quectel/utils.lua` - Shared utilities (sleep, format_band, extract_enodeb, add_frequency_info, same_cell)
-- `lua/prometheus-collectors/quectel.lua` - Prometheus metrics exporter
+- `lua/prometheus-collectors/quectel.lua` - Signal/cell metrics exporter
+- `lua/prometheus-collectors/quectel-watchdog.lua` - Watchdog state exporter
 - `bin/5g-info` - CLI tool for displaying modem info (table/JSON output)
 - `bin/5g-monitor` - ncurses TUI with color-coded signals and beep feedback
-- `bin/at` - Simple AT command wrapper
+- `bin/at` - Simple AT command wrapper (installed as `quectel-at`)
 - `bin/5g-lock` - Band and cell locking utility (declarative: `--apply` makes modem match UCI config exactly)
+- `bin/5g-led-bars` - procd daemon mapping NR/LTE RSRP to GL-X3000 panel LEDs
+- `bin/5g-watchdog` - procd daemon detecting NSA NR SCG drops via mmcli; recovers with `mmcli --disable`/`--enable`, falls back to `--set-allowed-modes` toggle
 
 See `README.md` for usage documentation.
 
 ## Key Decisions
 
 - **Language**: Lua (native to OpenWRT, no external deps except luaposix)
-- **Modem communication**: Direct serial via luaposix
+- **Modem communication**: Direct serial via luaposix for the AT-based tools; `mmcli` shell-out for `5g-watchdog` (no AT bus contention with MM)
+- **Bearer manager (25.12)**: ModemManager owns the WWAN net + bearer; the toolkit's AT tools coexist via `/etc/modemmanager/ignore-tty` + the patched MM tty hotplug script (shipped by `vjt/openwrt`)
 - **Configuration**: UCI only (`/etc/config/quectel`)
 - **Audio feedback**: Terminal bell (`\a`) for SSH compatibility
 - **Metrics**: Prometheus exporter for Grafana integration
