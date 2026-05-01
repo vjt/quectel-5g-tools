@@ -15,13 +15,14 @@
 -- After two failed stages in a row the watchdog stops trying and
 -- flags `capped=1` for Prometheus to alert on.
 --
--- All modem reads go through `mmcli -K`. No AT serial contention,
--- nothing fights MM for ownership of the modem.
+-- All modem reads go through `mmcli -J` (machine-readable JSON). No AT
+-- serial contention, nothing fights MM for ownership of the modem.
 
 package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 
 local quectel_uci = require("quectel.uci")
 local utils = require("quectel.utils")
+local jsonc = require("luci.jsonc")
 
 local STATE_PATH = "/var/run/5g-watchdog.state"
 local RECOVERY_POLL_INTERVAL = 3   -- seconds between mmcli polls while waiting for NR
@@ -72,35 +73,21 @@ local function run(cmd)
     return out, ok and 0 or (code or 1)
 end
 
--- Parse `mmcli -K` style "key  : value" output into a flat table.
--- Whitespace around the separator is collapsed; trailing empties drop.
--- Hyphens are part of legitimate mmcli keys (e.g. `access-technologies`,
--- `current-modes`, `power-state`) so the key class includes them.
-local function parse_kv(text)
-    local t = {}
-    for line in text:gmatch("[^\n]+") do
-        local k, v = line:match("^%s*([%w%.%[%]_%-]+)%s*:%s*(.-)%s*$")
-        if k and v then t[k] = v end
-    end
-    return t
-end
-
--- mmcli access-technologies / current-modes come out as ".length" + ".value[N]"
--- triples. Collect them into a Lua list.
-local function collect_array(kv, prefix)
-    local out = {}
-    local n = tonumber(kv[prefix .. ".length"]) or 0
-    for i = 1, n do
-        local v = kv[prefix .. ".value[" .. i .. "]"]
-        if v and v ~= "--" then table.insert(out, v) end
-    end
-    return out
+-- Run a command, parse stdout as JSON. Returns (table, 0) on success,
+-- (nil, code) otherwise. Used for `mmcli -J ...` calls.
+local function run_json(cmd)
+    local out, code = run(cmd)
+    if code ~= 0 or not out or out == "" then return nil, code end
+    local parsed = jsonc.parse(out)
+    if type(parsed) ~= "table" then return nil, -1 end
+    return parsed, 0
 end
 
 local function discover_modem_index()
-    local out = run("mmcli -L 2>/dev/null")
-    -- "/org/freedesktop/ModemManager1/Modem/0 [quectel] RM520N-GL"
-    local idx = out and out:match("/Modem/(%d+)")
+    local data = run_json("mmcli -J -L")
+    local list = data and data["modem-list"]
+    if type(list) ~= "table" or not list[1] then return nil end
+    local idx = list[1]:match("/Modem/(%d+)$")
     return idx and tonumber(idx) or nil
 end
 
@@ -172,9 +159,10 @@ end
 -- detection
 -- ---------------------------------------------------------------------
 
--- mmcli serialises current-modes as a single string of the form
---   "allowed: 3g, 4g, 5g; preferred: 5g"
--- Returns (allowed_list, preferred_string).
+-- mmcli serialises `current-modes` as a single human-readable string
+-- of the form "allowed: 3g, 4g, 5g; preferred: 5g" — the `-J` flag
+-- does NOT split it into structured fields, so this stays a string
+-- parse. Returns (allowed_list, preferred_string).
 local function parse_current_modes(s)
     if not s or s == "" or s == "--" then return {}, "" end
     local allowed_part, preferred = s:match("^%s*allowed:%s*(.-)%s*;%s*preferred:%s*(.-)%s*$")
@@ -189,14 +177,19 @@ local function parse_current_modes(s)
 end
 
 local function probe(idx)
-    local out, code = run(string.format("mmcli -m %d -K", idx))
-    if code ~= 0 or not out then
-        return nil, "mmcli -K failed"
+    local data, code = run_json(string.format("mmcli -m %d -J", idx))
+    if not data or type(data.modem) ~= "table" then
+        return nil, "mmcli -J failed (code=" .. tostring(code) .. ")"
     end
-    local kv = parse_kv(out)
-    local state = kv["modem.generic.state"] or "unknown"
-    local techs = collect_array(kv, "modem.generic.access-technologies")
-    local allowed, preferred = parse_current_modes(kv["modem.generic.current-modes"])
+    local g = data.modem.generic or {}
+    local state = g.state or "unknown"
+    local techs = {}
+    if type(g["access-technologies"]) == "table" then
+        for _, t in ipairs(g["access-technologies"]) do
+            if t ~= "--" then table.insert(techs, t) end
+        end
+    end
+    local allowed, preferred = parse_current_modes(g["current-modes"])
 
     local has_nr = false
     for _, t in ipairs(techs) do if t == "5gnr" then has_nr = true break end end
