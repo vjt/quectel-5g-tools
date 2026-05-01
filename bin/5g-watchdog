@@ -382,6 +382,21 @@ end
 while true do
     local p, err = probe(idx)
     if not p then
+        -- Modem may have moved to a different ModemManager index (USB
+        -- reset, modem firmware reboot, udev re-enumeration). Without
+        -- rediscovery we'd probe a dead index forever even after the
+        -- kernel sees the modem come back. Try `mmcli -L` again; if it
+        -- gives us a different index, switch and retry the probe in
+        -- this same tick rather than waiting a full poll interval.
+        local new_idx = discover_modem_index()
+        if new_idx and new_idx ~= idx then
+            log("modem index changed: %d -> %d (was probing a dead index)", idx, new_idx)
+            idx = new_idx
+            last_probe = nil  -- old transitions don't apply to a new modem
+            p, err = probe(idx)
+        end
+    end
+    if not p then
         if last_probe_err ~= err then
             log("probe error: %s", err or "?")
             last_probe_err = err
