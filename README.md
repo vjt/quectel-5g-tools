@@ -8,6 +8,13 @@ Quectel RM520N-GL modem and a Poynting XPOL-24 directional antenna,
 but the Lua/UCI plumbing isn't device-specific — anything OpenWrt
 ≥ 22.03 with an RM520N-class modem on `/dev/ttyUSB2` should work.
 
+See [`vjt/openwrt-glinet-x3000`](https://github.com/vjt/openwrt-glinet-x3000)
+for a vanilla OpenWrt 25.12 build with these tools baked in (grab the
+latest [release](https://github.com/vjt/openwrt-glinet-x3000/releases)
+and flash the sysupgrade bin), and
+[*GL-X3000 on Vanilla OpenWrt 25.12: Every Pitfall, Documented*](https://sindro.me/posts/2026-04-30-glinet-gl-x3000-vanilla-openwrt-25-12/)
+for the migration story.
+
 ## Features
 
 - **5g-info** — one-shot CLI dump of modem state (table or JSON).
