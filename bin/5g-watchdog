@@ -15,18 +15,23 @@
 -- After two failed stages in a row the watchdog stops trying and
 -- flags `capped=1` for Prometheus to alert on.
 --
--- All probe data — connected state, NR carrier count, mode preference —
--- comes straight from the modem over AT via the shared `quectel.modem`
--- Lua lib (AT+QCAINFO for the carrier-agg state, AT+QNWPREFCFG for the
--- mode preference). mmcli's QMI-derived views (`access-technologies`,
--- `current-modes`) are kept out of probe because they lie for NSA: they
--- keep reporting `5gnr` after the SCG dropped, which is exactly the
--- failure mode we're trying to detect.
+-- Detection vs recovery split:
 --
--- mmcli is still used for the *recovery* actions (--disable / --enable,
--- and AT-based mode toggle as fallback) since MM owns the bearer and
--- needs to be the one driving disconnect/reconnect — going around it
--- would leave MM out of sync with the radio.
+--   * Detection ("is NR actually attached right now?") goes over AT
+--     via the shared `quectel.modem` lib. AT+QCAINFO gives the modem's
+--     own carrier-aggregation list (pcc + scc[] each tagged
+--     rat="lte"|"5g"); AT+QNWPREFCFG gives the mode preference. mmcli
+--     is kept out of detection because its `access-technologies` field
+--     comes from the QMI registration surface, which keeps reporting
+--     `5gnr` after the NSA SCG has been dropped — i.e. it lies in
+--     exactly the failure mode we're trying to detect.
+--   * Recovery (both stage 1 disable/enable and stage 2 mode toggle)
+--     goes through mmcli. Mode changes drop the bearer, and that's
+--     MM's job — driving bearer disconnect/reconnect from outside MM
+--     would leave its state machine guessing. The `current-modes`
+--     field stage 2 reads as a pre-action snapshot is config state,
+--     not the lying registration view, so trusting mmcli for it is
+--     fine.
 --
 -- AT bus contention is not a problem: the rest of quectel-5g-tools
 -- (5g-info, 5g-monitor, 5g-led-bars) shares the same AT port via
@@ -143,36 +148,65 @@ local function stage1_disable_enable(idx)
     end
 end
 
--- Stage 2: drop the modem's mode preference to LTE-only via
--- AT+QNWPREFCFG="mode_pref", wait, then restore it to whatever it was
--- before. The mode-pref flip forces the firmware to drop NR
--- measurements and restart them clean — the heaviest lever we have
--- short of an attach toggle. We do this over AT (not mmcli) because the
--- mmcli surface for "current-modes" is the same QMI registration view
--- that lies about NSA SCG state, and going through AT keeps the radio
--- and the firmware in sync without involving MM's caching at all.
+-- mmcli serialises `current-modes` as a single human-readable string
+-- of the form "allowed: 3g, 4g, 5g; preferred: 5g" — this is config
+-- state (what the user has the radio set to), NOT the lying
+-- access-technologies registration view, so it's safe to read from
+-- mmcli for stage 2's pre-action snapshot. -J doesn't break this out
+-- into structured fields, so we string-parse it. Returns
+-- (allowed_list, preferred_string).
+local function parse_current_modes(s)
+    if not s or s == "" or s == "--" then return {}, "" end
+    local allowed_part, preferred = s:match("^%s*allowed:%s*(.-)%s*;%s*preferred:%s*(.-)%s*$")
+    if not allowed_part then
+        allowed_part = s:match("^%s*allowed:%s*(.-)%s*$") or s
+        preferred = ""
+    end
+    local list = {}
+    for m in allowed_part:gmatch("[^,%s]+") do table.insert(list, m) end
+    return list, preferred or ""
+end
+
+-- Stage 2: snapshot current allowed-modes + preferred-mode via mmcli,
+-- drop allowed to 4g-only, wait, then restore exactly. The "drop+
+-- restore" forces the firmware to re-evaluate RAT priorities and
+-- reattach NR clean.
+--
+-- Stays on mmcli (rather than going AT) because mode changes drop the
+-- bearer, and that's exactly MM's job to manage — going around MM with
+-- AT+QNWPREFCFG would leave its bearer state machine guessing whether
+-- the unsolicited disconnect is recoverable. The current-modes field
+-- we read here is config state, not the lying access-technologies
+-- registration view, so trusting mmcli is fine for this purpose.
 --
 -- If the restore call fails the daemon will retry on the next probe
 -- (state file flags `capped` so Prometheus picks it up).
-local function stage2_mode_toggle(prev_mode_pref)
-    if not prev_mode_pref or prev_mode_pref == "" then
-        log("stage2: refusing to run, no mode_pref captured")
+local function stage2_mode_toggle(idx)
+    local data = run_json(string.format("mmcli -m %d -J", idx))
+    if not data or type(data.modem) ~= "table" then
+        log("stage2: mmcli snapshot failed; refusing to run")
         return false
     end
-    log("stage2: AT mode_pref drop to LTE, then restore to %s", prev_mode_pref)
-    local m = Modem.new(AT_DEVICE, AT_TIMEOUT)
-    local ok, err = m:open()
-    if not ok then
-        log("stage2: modem open failed: %s", tostring(err))
+    local g = data.modem.generic or {}
+    local allowed, preferred = parse_current_modes(g["current-modes"])
+    if #allowed == 0 then
+        log("stage2: no current allowed modes captured; refusing to run")
         return false
     end
-    local _, drop_err = m:set_mode_pref("LTE")
+    local allowed_pipes = table.concat(allowed, "|")
+    local restore = string.format(
+        "mmcli -m %d --set-allowed-modes='%s'%s",
+        idx, allowed_pipes,
+        (preferred ~= "" and preferred ~= "none")
+            and (" --set-preferred-mode=" .. preferred) or "")
+    log("stage2: drop to 4g, then restore: %s", restore)
+
+    local _, c1 = run(string.format("mmcli -m %d --set-allowed-modes='4g'", idx))
     utils.sleep(4)
-    local _, restore_err = m:set_mode_pref(prev_mode_pref)
-    m:close()
-    if drop_err or restore_err then
-        log("stage2: drop_err=%s restore_err=%s",
-            tostring(drop_err or "ok"), tostring(restore_err or "ok"))
+    local _, c2 = run(restore)
+    if c1 ~= 0 or c2 ~= 0 then
+        log("stage2: drop=%d restore=%d (non-zero) — restore cmd: %s",
+            c1, c2, restore)
         return false
     end
     return true
@@ -342,30 +376,24 @@ local function take_action()
     end
     capped = false
 
-    -- Snapshot mode_pref for stage 2 restore (in case we need it).
-    local pre = probe()
-    if not pre then
-        log("probe failed before action; skipping this round")
+    -- Both stages go through MM (it's the bearer manager — driving
+    -- bearer disconnect/reconnect from outside MM would risk leaving
+    -- its state machine guessing). The MM modem index can change at
+    -- runtime (USB reset / udev re-enum / firmware reboot), so we
+    -- rediscover just-in-time per action instead of caching.
+    local mm_idx = discover_modem_index()
+    if not mm_idx then
+        log("no modem visible to ModemManager; skipping action")
         return
     end
 
     local stage
     if consecutive_failed_actions == 0 or not stage2_enabled then
         stage = "disable_enable"
-        -- Stage 1 still goes through MM so the bearer manager stays in
-        -- sync — but the MM modem index can change at runtime (USB reset
-        -- / udev re-enum / firmware reboot), so we rediscover on every
-        -- action instead of caching.
-        local mm_idx = discover_modem_index()
-        if mm_idx then
-            stage1_disable_enable(mm_idx)
-        else
-            log("stage1: no modem visible to ModemManager; skipping action")
-            return
-        end
+        stage1_disable_enable(mm_idx)
     else
         stage = "mode_toggle"
-        local ok = stage2_mode_toggle(pre.mode_pref)
+        local ok = stage2_mode_toggle(mm_idx)
         if not ok then
             log("stage2 reported a non-zero exit; will retry restore on next pass")
         end

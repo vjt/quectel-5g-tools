@@ -279,24 +279,6 @@ function M:set_bands(setting, bands)
     return resp:match("OK") ~= nil
 end
 
---- Set mode preference (RAT preference)
--- AT+QNWPREFCFG="mode_pref",<value>
--- Values per Quectel doc: AUTO, LTE, NR5G, WCDMA, or colon-joined
--- combinations like LTE:NR5G, LTE:NR5G:WCDMA. The radio acts on this
--- immediately — flipping mode_pref forces a re-attach with the new
--- RAT set, which is the heaviest non-toggle lever short of CFUN.
--- @param value Mode pref string
--- @return true on success, or nil + error
-function M:set_mode_pref(value)
-    if not value or value == "" then
-        return nil, "empty mode_pref"
-    end
-    local resp, err = self:send('AT+QNWPREFCFG="mode_pref",' .. value)
-    if not resp then return nil, err end
-    if not resp:match("OK") then return nil, "no OK in response: " .. resp end
-    return true
-end
-
 --- Get cell lock status
 -- @param lock_type "common/4g" or "common/5g"
 -- @return Parsed lock info table, or nil + error
