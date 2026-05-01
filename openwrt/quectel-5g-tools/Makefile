@@ -14,7 +14,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
-PKG_VERSION:=1.1.0
+PKG_VERSION:=1.2.0
 PKG_RELEASE:=0
 
 PKG_SOURCE_PROTO:=git
@@ -33,7 +33,7 @@ define Package/quectel-5g-tools
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Quectel 5G Modem Tools
-  DEPENDS:=+lua +luaposix +libuci-lua
+  DEPENDS:=+lua +luaposix +libuci-lua +modemmanager
   URL:=https://github.com/vjt/quectel-5g-tools
 endef
 
@@ -44,6 +44,8 @@ define Package/quectel-5g-tools/description
     - 5g-info: CLI tool for displaying modem information
     - 5g-monitor: Real-time TUI monitor with signal quality display and beeps
     - 5g-led-bars: procd service driving the GL-X3000 5G signal LEDs from RSRP
+    - 5g-watchdog: procd service that detects NSA NR SCG drops via mmcli
+      and forces a re-attach (disable/enable, mode-toggle fallback).
     - at: Simple AT command wrapper
     - 5g-lock: Band and cell locking utility
     - Prometheus collector for prometheus-node-exporter-lua
@@ -61,15 +63,16 @@ define Package/quectel-5g-tools/install
 	$(INSTALL_DIR) $(1)/usr/lib/lua/quectel
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/lua/quectel/*.lua $(1)/usr/lib/lua/quectel/
 
-	# Install Prometheus collector
+	# Install Prometheus collectors (glob: quectel.lua + quectel-watchdog.lua + any added later)
 	$(INSTALL_DIR) $(1)/usr/lib/lua/prometheus-collectors
-	$(INSTALL_DATA) $(PKG_BUILD_DIR)/lua/prometheus-collectors/quectel.lua $(1)/usr/lib/lua/prometheus-collectors/
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/lua/prometheus-collectors/*.lua $(1)/usr/lib/lua/prometheus-collectors/
 
 	# Install binaries
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-info $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-monitor $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-led-bars $(1)/usr/bin/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-watchdog $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/at $(1)/usr/bin/quectel-at
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/5g-lock $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/modem-debug $(1)/usr/bin/
@@ -77,6 +80,7 @@ define Package/quectel-5g-tools/install
 	# Install procd init scripts
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/init.d/5g-led-bars $(1)/etc/init.d/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/init.d/5g-watchdog $(1)/etc/init.d/
 
 	# Tell ModemManager to skip the Quectel USB AT/DIAG/NMEA/AT2 ports
 	# (/dev/ttyUSB0..3). The patched /etc/hotplug.d/tty/25-modemmanager-tty
