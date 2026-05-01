@@ -81,11 +81,17 @@ end
 --- Create a new modem instance
 -- @param device Serial device path (default: /dev/ttyUSB2)
 -- @param timeout Read timeout in seconds (default: 2)
+-- @param lock_wait_ms Optional max wait for /var/lock/quectel-modem.lock,
+--   in milliseconds. Defaults to LOCK_WAIT_MS_DEFAULT (2000ms). Bump
+--   this for callers that can tolerate a longer queue behind whichever
+--   helper is currently holding the lock — e.g. 5g-watchdog at startup,
+--   when 5g-led-bars / 5g-monitor may be mid-poll.
 -- @return Modem instance
-function M.new(device, timeout)
+function M.new(device, timeout, lock_wait_ms)
     local self = setmetatable({}, M)
     self.device = device or DEFAULT_DEVICE
     self.timeout = timeout or DEFAULT_TIMEOUT
+    self.lock_wait_ms = lock_wait_ms
     self.fd = nil
     self.has_lock = false
     return self
@@ -95,7 +101,7 @@ end
 -- @return true on success, nil + error on failure
 function M:open()
     -- Acquire lock first
-    local ok, lock_err = acquire_lock()
+    local ok, lock_err = acquire_lock(self.lock_wait_ms)
     if not ok then
         return nil, lock_err
     end

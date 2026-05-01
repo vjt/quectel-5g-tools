@@ -46,7 +46,14 @@ local Modem = require("quectel.modem")
 local jsonc = require("luci.jsonc")
 
 local AT_DEVICE = quectel_uci.get_string("quectel", "modem", "device", "/dev/ttyUSB2")
-local AT_TIMEOUT = 5  -- seconds; lock-retry poll inside Modem:open() handles contention
+local AT_TIMEOUT = 5         -- seconds, AT response timeout
+-- The 5g-* helpers and the watchdog all share /dev/ttyUSB2 via
+-- /var/lock/quectel-modem.lock. The default 2000ms wait works fine in
+-- steady state, but at boot or right after a sysupgrade the helpers
+-- are simultaneously starting up and lock contention is heaviest.
+-- Five seconds is enough headroom for 5g-led-bars (refresh_interval=5s)
+-- to finish its current poll and release the lock.
+local AT_LOCK_WAIT_MS = 5000
 
 local STATE_PATH = "/var/run/5g-watchdog.state"
 local RECOVERY_POLL_INTERVAL = 3   -- seconds between mmcli polls while waiting for NR
@@ -219,7 +226,7 @@ end
 local function probe()
     -- One open/close per probe — both AT calls share the lock so we
     -- only contend with the rest of quectel-5g-tools once.
-    local m = Modem.new(AT_DEVICE, AT_TIMEOUT)
+    local m = Modem.new(AT_DEVICE, AT_TIMEOUT, AT_LOCK_WAIT_MS)
     local ok, err = m:open()
     if not ok then return nil, "modem open: " .. tostring(err) end
     local sig, sig_err = m:get_signal_status()
