@@ -123,8 +123,18 @@ local function discover_modem_index()
 end
 
 -- ---------------------------------------------------------------------
--- state file (atomic write)
+-- state file (atomic write + read-on-startup)
 -- ---------------------------------------------------------------------
+--
+-- STATE_PATH lives under /var/run, which is tmpfs on OpenWrt: the file
+-- survives a procd respawn (so we don't lose cooldown / failed-action
+-- counters across daemon restart and end up double-acting on the modem)
+-- but dies on reboot (correct — modem also comes up fresh after reboot).
+-- Stale-state risk is bounded by STATE_TTL: anything older than 24h is
+-- discarded so a wedged file from yesterday can't pin
+-- consecutive_failed_actions forever.
+
+local STATE_TTL = 86400
 
 local function write_state(state)
     local tmp = STATE_PATH .. ".tmp"
@@ -139,6 +149,43 @@ local function write_state(state)
     end
     f:close()
     os.rename(tmp, STATE_PATH)
+end
+
+-- Parse the flat key=value file back into a table. Values come back as
+-- strings; callers cast to number/bool as needed. Returns nil if the
+-- file isn't there or can't be opened.
+local function read_state()
+    local f = io.open(STATE_PATH, "r")
+    if not f then return nil end
+    local s = {}
+    for line in f:lines() do
+        local k, v = line:match("^([^=]+)=(.*)$")
+        if k then s[k] = v end
+    end
+    f:close()
+    return s
+end
+
+-- action_history is a list of {ts, stage}; serialise as ts:stage|ts:stage
+-- so it round-trips through the flat key=value state file.
+local function serialise_history(hist)
+    local parts = {}
+    for _, e in ipairs(hist) do
+        table.insert(parts, string.format("%d:%s", e.ts, e.stage))
+    end
+    return table.concat(parts, "|")
+end
+
+local function deserialise_history(s)
+    local hist = {}
+    if not s or s == "" then return hist end
+    for entry in s:gmatch("[^|]+") do
+        local ts, stage = entry:match("^(%d+):(.+)$")
+        if ts and stage then
+            table.insert(hist, { ts = tonumber(ts), stage = stage })
+        end
+    end
+    return hist
 end
 
 -- ---------------------------------------------------------------------
@@ -351,6 +398,7 @@ local function emit_state(p)
         actions_total_mode_toggle    = actions_total.mode_toggle,
         consecutive_failed_actions   = consecutive_failed_actions,
         capped                 = capped and 1 or 0,
+        action_history         = serialise_history(action_history),
         updated_ts             = os.time(),
     }
     write_state(s)
@@ -439,6 +487,34 @@ local last_capped = false
 local last_probe_err = nil
 local first_pass = true
 
+-- Restore from /var/run/5g-watchdog.state if it's recent enough.
+-- Without this, a procd respawn mid-incident loses cooldown +
+-- consecutive_failed_actions and the next cycle redoes stage1 from
+-- scratch instead of escalating to stage2 (and could blow past
+-- daily_cap by re-zeroing action_history).
+do
+    local prev = read_state()
+    local now = os.time()
+    local prev_ts = prev and tonumber(prev.updated_ts) or 0
+    if prev and prev_ts > 0 and (now - prev_ts) <= STATE_TTL then
+        cooldown_until         = tonumber(prev.cooldown_until) or 0
+        last_action_ts         = tonumber(prev.last_action_ts) or 0
+        last_action_stage      = prev.last_action_stage or ""
+        last_recovery_seconds  = tonumber(prev.last_recovery_seconds) or 0
+        actions_total.disable_enable = tonumber(prev.actions_total_disable_enable) or 0
+        actions_total.mode_toggle    = tonumber(prev.actions_total_mode_toggle) or 0
+        consecutive_failed_actions   = tonumber(prev.consecutive_failed_actions) or 0
+        capped                 = (prev.capped == "1" or prev.capped == "true")
+        action_history         = deserialise_history(prev.action_history)
+        log("restored state from %ds ago: cooldown_until=%d failed_actions=%d actions_24h=%d capped=%s",
+            now - prev_ts, cooldown_until, consecutive_failed_actions,
+            actions_in_24h(), tostring(capped))
+        last_capped = capped
+    elseif prev and prev_ts > 0 then
+        log("ignoring stale state file (%ds old, ttl=%ds)", now - prev_ts, STATE_TTL)
+    end
+end
+
 local function probe_summary(p)
     if not p then return "probe=nil" end
     return string.format(
@@ -505,7 +581,7 @@ while true do
             log("degraded sample %d/%d (nr_carriers=%d)%s",
                 consecutive_degraded, degraded_samples, p.nr_carriers or 0,
                 in_cooldown and string.format(" — cooldown active for another %ds", cooldown_until - now) or "")
-            if consecutive_degraded == degraded_samples then
+            if consecutive_degraded >= degraded_samples then
                 if in_cooldown then
                     log("threshold reached but cooldown active until %d (in %ds); deferring",
                         cooldown_until, cooldown_until - now)
