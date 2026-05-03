@@ -14,8 +14,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
-PKG_VERSION:=1.2.3
-PKG_RELEASE:=2
+PKG_VERSION:=1.3.0
+PKG_RELEASE:=1
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/vjt/quectel-5g-tools.git
@@ -33,7 +33,7 @@ define Package/quectel-5g-tools
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Quectel 5G Modem Tools
-  DEPENDS:=+lua +luaposix +libuci-lua +luci-lib-jsonc +modemmanager
+  DEPENDS:=+lua +luaposix +libuci-lua +luci-lib-jsonc +modemmanager +curl
   URL:=https://github.com/vjt/quectel-5g-tools
 endef
 
