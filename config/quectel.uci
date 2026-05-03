@@ -22,6 +22,22 @@ config watchdog 'watchdog'
 	option enabled '1'
 	option poll_interval '60'
 	option degraded_samples '5'
-	option cooldown '900'
-	option daily_cap '6'
-	option enable_mode_toggle '1'
+	# how long to wait after the mode toggle for NR to reattach before
+	# calling it a failure. 60s is too tight in marginal cells (NR
+	# sometimes returns at 90–150s).
+	option recovery_wait_seconds '180'
+	# cooldown after a successful recovery — give the cell a chance to
+	# settle before we test it again
+	option cooldown_ok '300'
+	# cooldown after a failed recovery; doubles each consecutive failure
+	# up to cooldown_fail_max (4h). Resets on next success / cell-driven
+	# recovery.
+	option cooldown_fail '1800'
+	option cooldown_fail_max '14400'
+	# Telegram alerts (opt-in: leave token/chat empty to disable). Two
+	# independent triggers, both off by default (set the seconds/count
+	# to a non-zero value to enable).
+	option alert_after_failed '0'
+	option alert_detach_seconds '0'
+	option telegram_token ''
+	option telegram_chat ''

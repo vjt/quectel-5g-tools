@@ -7,13 +7,14 @@
 -- bearer keeps working at LTE-only throughput. Recovery requires the
 -- UE to re-advertise NSA capability on a fresh attach.
 --
--- Two-stage recovery:
---   1. mmcli --disable + --enable (NAS detach/attach, ~8s dropout).
---   2. mmcli --set-allowed-modes='4g' then restore (RAT toggle,
---      forces firmware to drop+restart NR measurements).
--- Stage 2 only runs if stage 1 did not recover NR after the cooldown.
--- After two failed stages in a row the watchdog stops trying and
--- flags `capped=1` for Prometheus to alert on.
+-- Recovery action: mmcli --set-allowed-modes='4g' then restore (RAT
+-- toggle, forces firmware to drop+restart NR measurements). Empirical
+-- 7-day data on jeeves: 100% recovery rate, ~33s. The previous
+-- two-stage design that tried `mmcli --disable + --enable` first was
+-- removed — that "stage 1" had a 0% real recovery rate (its rare
+-- successes lined up exactly with the polling boundary, i.e. cell-
+-- driven recovery happening to coincide with our wait window) and only
+-- wasted 60s + a budget slot before stage 2 fired anyway.
 --
 -- Detection vs recovery split:
 --
@@ -25,18 +26,28 @@
 --     comes from the QMI registration surface, which keeps reporting
 --     `5gnr` after the NSA SCG has been dropped — i.e. it lies in
 --     exactly the failure mode we're trying to detect.
---   * Recovery (both stage 1 disable/enable and stage 2 mode toggle)
---     goes through mmcli. Mode changes drop the bearer, and that's
---     MM's job — driving bearer disconnect/reconnect from outside MM
---     would leave its state machine guessing. The `current-modes`
---     field stage 2 reads as a pre-action snapshot is config state,
---     not the lying registration view, so trusting mmcli for it is
---     fine.
+--   * Recovery (mode toggle) goes through mmcli. Mode changes drop the
+--     bearer, and that's MM's job — driving bearer disconnect/reconnect
+--     from outside MM would leave its state machine guessing. The
+--     `current-modes` field we read as a pre-action snapshot is config
+--     state, not the lying registration view, so trusting mmcli for it
+--     is fine.
 --
--- AT bus contention is not a problem: the rest of quectel-5g-tools
--- (5g-info, 5g-monitor, 5g-led-bars) shares the same AT port via
--- /var/lock/quectel-modem.lock with a bounded poll-retry loop, so the
--- watchdog just queues behind whichever helper is talking to the modem.
+-- Backoff model (replaces the old 24h-window daily_cap):
+--   * After a successful recovery: cooldown_ok (default 300s) — give
+--     the cell a chance to settle before we test it again.
+--   * After a failed recovery: cooldown_fail (default 1800s, doubles
+--     each consecutive failure up to cooldown_fail_max) — back off so
+--     we don't flap a wedged radio. Resets on next success or
+--     cell-driven recovery.
+--
+-- Telegram alerts (opt-in, off by default — set telegram_token and
+-- telegram_chat in UCI to enable):
+--   * 🔻 after `alert_after_failed` consecutive failed actions
+--   * 🔻 if NR has been detached for `alert_detach_seconds` and the
+--     daemon hasn't been able to act (e.g. wedged in cooldown)
+--   * ✅ on recovery, but only if an alert was sent during the current
+--     incident — no spam for incidents we never escalated on.
 
 package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 
@@ -57,7 +68,11 @@ local AT_LOCK_WAIT_MS = 5000
 
 local STATE_PATH = "/var/run/5g-watchdog.state"
 local RECOVERY_POLL_INTERVAL = 3   -- seconds between mmcli polls while waiting for NR
-local RECOVERY_MAX_WAIT = 60       -- give NR up to 60s to re-attach after action
+-- RECOVERY_MAX_WAIT is read from UCI (recovery_wait_seconds, default
+-- 180s). 60s was too tight: empirically the cell sometimes brings NR
+-- back 90–150s after the mode toggle and we'd misclassify a slow
+-- success as a failure → trigger the long fail cooldown for nothing.
+local RECOVERY_MAX_WAIT
 
 -- Log via `logger -t 5g-watchdog` so messages land in syslog (logread)
 -- regardless of whether we're under procd or running standalone. We
@@ -166,48 +181,16 @@ local function read_state()
     return s
 end
 
--- action_history is a list of {ts, stage}; serialise as ts:stage|ts:stage
--- so it round-trips through the flat key=value state file.
-local function serialise_history(hist)
-    local parts = {}
-    for _, e in ipairs(hist) do
-        table.insert(parts, string.format("%d:%s", e.ts, e.stage))
-    end
-    return table.concat(parts, "|")
-end
-
-local function deserialise_history(s)
-    local hist = {}
-    if not s or s == "" then return hist end
-    for entry in s:gmatch("[^|]+") do
-        local ts, stage = entry:match("^(%d+):(.+)$")
-        if ts and stage then
-            table.insert(hist, { ts = tonumber(ts), stage = stage })
-        end
-    end
-    return hist
-end
-
 -- ---------------------------------------------------------------------
--- action stages
+-- recovery action: mmcli mode toggle
 -- ---------------------------------------------------------------------
-
-local function stage1_disable_enable(idx)
-    log("stage1: mmcli --disable + --enable")
-    local _, c1 = run(string.format("mmcli -m %d --disable", idx))
-    utils.sleep(2)
-    local _, c2 = run(string.format("mmcli -m %d --enable", idx))
-    if c1 ~= 0 or c2 ~= 0 then
-        log("stage1: disable=%d enable=%d (non-zero)", c1, c2)
-    end
-end
 
 -- mmcli serialises `current-modes` as a single human-readable string
 -- of the form "allowed: 3g, 4g, 5g; preferred: 5g" — this is config
 -- state (what the user has the radio set to), NOT the lying
 -- access-technologies registration view, so it's safe to read from
--- mmcli for stage 2's pre-action snapshot. -J doesn't break this out
--- into structured fields, so we string-parse it. Returns
+-- mmcli for the pre-action snapshot. -J doesn't break this out into
+-- structured fields, so we string-parse it. Returns
 -- (allowed_list, preferred_string).
 local function parse_current_modes(s)
     if not s or s == "" or s == "--" then return {}, "" end
@@ -221,30 +204,25 @@ local function parse_current_modes(s)
     return list, preferred or ""
 end
 
--- Stage 2: snapshot current allowed-modes + preferred-mode via mmcli,
--- drop allowed to 4g-only, wait, then restore exactly. The "drop+
--- restore" forces the firmware to re-evaluate RAT priorities and
--- reattach NR clean.
+-- Snapshot current allowed-modes + preferred-mode via mmcli, drop
+-- allowed to 4g-only, wait, then restore exactly. The "drop+restore"
+-- forces the firmware to re-evaluate RAT priorities and reattach NR
+-- clean.
 --
 -- Stays on mmcli (rather than going AT) because mode changes drop the
 -- bearer, and that's exactly MM's job to manage — going around MM with
 -- AT+QNWPREFCFG would leave its bearer state machine guessing whether
--- the unsolicited disconnect is recoverable. The current-modes field
--- we read here is config state, not the lying access-technologies
--- registration view, so trusting mmcli is fine for this purpose.
---
--- If the restore call fails the daemon will retry on the next probe
--- (state file flags `capped` so Prometheus picks it up).
-local function stage2_mode_toggle(idx)
+-- the unsolicited disconnect is recoverable.
+local function mode_toggle(idx)
     local data = run_json(string.format("mmcli -m %d -J", idx))
     if not data or type(data.modem) ~= "table" then
-        log("stage2: mmcli snapshot failed; refusing to run")
+        log("mode_toggle: mmcli snapshot failed; refusing to run")
         return false
     end
     local g = data.modem.generic or {}
     local allowed, preferred = parse_current_modes(g["current-modes"])
     if #allowed == 0 then
-        log("stage2: no current allowed modes captured; refusing to run")
+        log("mode_toggle: no current allowed modes captured; refusing to run")
         return false
     end
     local allowed_pipes = table.concat(allowed, "|")
@@ -253,13 +231,13 @@ local function stage2_mode_toggle(idx)
         idx, allowed_pipes,
         (preferred ~= "" and preferred ~= "none")
             and (" --set-preferred-mode=" .. preferred) or "")
-    log("stage2: drop to 4g, then restore: %s", restore)
+    log("mode_toggle: drop to 4g, then restore: %s", restore)
 
     local _, c1 = run(string.format("mmcli -m %d --set-allowed-modes='4g'", idx))
     utils.sleep(4)
     local _, c2 = run(restore)
     if c1 ~= 0 or c2 ~= 0 then
-        log("stage2: drop=%d restore=%d (non-zero) — restore cmd: %s",
+        log("mode_toggle: drop=%d restore=%d (non-zero) — restore cmd: %s",
             c1, c2, restore)
         return false
     end
@@ -330,11 +308,50 @@ if not enabled then
     os.exit(0)
 end
 
-local poll_interval     = quectel_uci.get_number("quectel", "watchdog", "poll_interval", 60)
-local degraded_samples  = quectel_uci.get_number("quectel", "watchdog", "degraded_samples", 5)
-local cooldown_seconds  = quectel_uci.get_number("quectel", "watchdog", "cooldown", 900)
-local daily_cap         = quectel_uci.get_number("quectel", "watchdog", "daily_cap", 6)
-local stage2_enabled    = quectel_uci.get_bool("quectel", "watchdog", "enable_mode_toggle", true)
+local poll_interval       = quectel_uci.get_number("quectel", "watchdog", "poll_interval", 60)
+local degraded_samples    = quectel_uci.get_number("quectel", "watchdog", "degraded_samples", 5)
+RECOVERY_MAX_WAIT         = quectel_uci.get_number("quectel", "watchdog", "recovery_wait_seconds", 180)
+local cooldown_ok         = quectel_uci.get_number("quectel", "watchdog", "cooldown_ok", 300)
+local cooldown_fail       = quectel_uci.get_number("quectel", "watchdog", "cooldown_fail", 1800)
+local cooldown_fail_max   = quectel_uci.get_number("quectel", "watchdog", "cooldown_fail_max", 14400)
+local alert_after_failed  = quectel_uci.get_number("quectel", "watchdog", "alert_after_failed", 0)
+local alert_detach_secs   = quectel_uci.get_number("quectel", "watchdog", "alert_detach_seconds", 0)
+local tg_token            = quectel_uci.get_string("quectel", "watchdog", "telegram_token", "")
+local tg_chat             = quectel_uci.get_string("quectel", "watchdog", "telegram_chat", "")
+
+-- Telegram is opt-in: empty token OR empty chat = disabled. The alert
+-- thresholds also each independently no-op when set to 0.
+local function tg_enabled()
+    return tg_token ~= "" and tg_chat ~= ""
+end
+
+-- Hostname is shipped in the alert text so a single Telegram channel
+-- can carry alerts from multiple routers without context confusion.
+local function hostname()
+    local f = io.open("/proc/sys/kernel/hostname", "r")
+    if not f then return "unknown" end
+    local h = (f:read("*l") or "unknown")
+    f:close()
+    return h
+end
+local HOSTNAME = hostname()
+
+-- Telegram POST is backgrounded + capped at 10s so a hung api.telegram.org
+-- call can't stall the watchdog loop. We still log the attempt so syslog
+-- has a record even if the API never replies.
+local function notify_telegram(text)
+    if not tg_enabled() then return end
+    log("telegram alert: %s", text)
+    local cmd = string.format(
+        "(curl -sS --max-time 10 " ..
+        "-d chat_id=%s " ..
+        "-d parse_mode=Markdown " ..
+        "--data-urlencode text=%q " ..
+        "'https://api.telegram.org/bot%s/sendMessage' " ..
+        ">/dev/null 2>&1) &",
+        tg_chat, text, tg_token)
+    os.execute(cmd)
+end
 
 log("starting up: probing modem over AT (%s)", AT_DEVICE)
 
@@ -354,30 +371,25 @@ if not first_p then
         os.exit(1)
     end
 end
-log("started: poll=%ds hysteresis=%d cooldown=%ds daily_cap=%d stage2=%s",
-    poll_interval, degraded_samples, cooldown_seconds, daily_cap,
-    stage2_enabled and "on" or "off")
+log("started: poll=%ds hysteresis=%d recovery_wait=%ds cooldown_ok=%ds cooldown_fail=%ds (max %ds) alert_after_failed=%d alert_detach=%ds telegram=%s",
+    poll_interval, degraded_samples, RECOVERY_MAX_WAIT, cooldown_ok,
+    cooldown_fail, cooldown_fail_max, alert_after_failed,
+    alert_detach_secs, tg_enabled() and "on" or "off")
 
 local consecutive_degraded = 0
 local cooldown_until = 0
 local last_action_ts = 0
-local last_action_stage = ""
 local last_recovery_seconds = 0
-local actions_total = { disable_enable = 0, mode_toggle = 0 }
-local action_history = {}            -- list of {ts, stage}
-local consecutive_failed_actions = 0 -- resets on healthy NR
-local capped = false
-
-local function actions_in_24h()
-    local now = os.time()
-    local cutoff = now - 86400
-    local kept = {}
-    for _, e in ipairs(action_history) do
-        if e.ts >= cutoff then table.insert(kept, e) end
-    end
-    action_history = kept
-    return #kept
-end
+local actions_total_mode_toggle = 0
+local consecutive_failed_actions = 0
+-- nr_detached_since: unix-ts when the current detach started (0 = NR
+-- attached or never observed detached). Reset to 0 on any recovery.
+local nr_detached_since = 0
+-- alerted_*: per-incident "did we already send this alert" flag, so a
+-- long detach doesn't keep firing the same Telegram message every
+-- minute. Both reset on recovery.
+local alerted_failed = false
+local alerted_detach_long = false
 
 local function emit_state(p)
     local s = {
@@ -391,14 +403,12 @@ local function emit_state(p)
         consecutive_degraded   = consecutive_degraded,
         cooldown_until         = cooldown_until,
         last_action_ts         = last_action_ts,
-        last_action_stage      = last_action_stage,
         last_recovery_seconds  = last_recovery_seconds,
-        actions_24h            = actions_in_24h(),
-        actions_total_disable_enable = actions_total.disable_enable,
-        actions_total_mode_toggle    = actions_total.mode_toggle,
+        actions_total_mode_toggle    = actions_total_mode_toggle,
         consecutive_failed_actions   = consecutive_failed_actions,
-        capped                 = capped and 1 or 0,
-        action_history         = serialise_history(action_history),
+        nr_detached_since      = nr_detached_since,
+        alerted_failed         = alerted_failed and 1 or 0,
+        alerted_detach_long    = alerted_detach_long and 1 or 0,
         updated_ts             = os.time(),
     }
     write_state(s)
@@ -419,79 +429,83 @@ local function measure_recovery()
     return RECOVERY_MAX_WAIT + 1, probe()
 end
 
+-- Exponential backoff on consecutive failures: cooldown_fail,
+-- 2*cooldown_fail, 4*cooldown_fail, ..., capped at cooldown_fail_max.
+-- failures argument is the count *including* the failure we just took.
+local function failure_cooldown(failures)
+    local backoff = cooldown_fail * (2 ^ math.max(0, failures - 1))
+    if backoff > cooldown_fail_max then backoff = cooldown_fail_max end
+    return math.floor(backoff)
+end
+
+-- Reset the per-incident tracking after any recovery (action-driven or
+-- cell-driven). If we'd previously alerted on this incident, send the
+-- complementary "back up" notification so the alert isn't a dead end.
+local function on_recovery(reason)
+    local was_alerted = alerted_failed or alerted_detach_long
+    if was_alerted then
+        notify_telegram(string.format("✅ *%s* 5G NR back (%s)", HOSTNAME, reason))
+    end
+    consecutive_failed_actions = 0
+    nr_detached_since = 0
+    alerted_failed = false
+    alerted_detach_long = false
+end
+
 local function take_action()
     local now = os.time()
     if now < cooldown_until then return end
-    if actions_in_24h() >= daily_cap then
-        if not capped then
-            log("daily cap (%d) reached, backing off until tomorrow", daily_cap)
-        end
-        capped = true
-        return
-    end
-    capped = false
 
-    -- Both stages go through MM (it's the bearer manager — driving
-    -- bearer disconnect/reconnect from outside MM would risk leaving
-    -- its state machine guessing). The MM modem index can change at
-    -- runtime (USB reset / udev re-enum / firmware reboot), so we
-    -- rediscover just-in-time per action instead of caching.
+    -- The MM modem index can change at runtime (USB reset / udev
+    -- re-enum / firmware reboot), so we rediscover just-in-time per
+    -- action instead of caching.
     local mm_idx = discover_modem_index()
     if not mm_idx then
         log("no modem visible to ModemManager; skipping action")
         return
     end
 
-    local stage
-    if consecutive_failed_actions == 0 or not stage2_enabled then
-        stage = "disable_enable"
-        stage1_disable_enable(mm_idx)
-    else
-        stage = "mode_toggle"
-        local ok = stage2_mode_toggle(mm_idx)
-        if not ok then
-            log("stage2 reported a non-zero exit; will retry restore on next pass")
-        end
-    end
+    mode_toggle(mm_idx)
 
     local recovered_in, post = measure_recovery()
     last_action_ts = os.time()
-    last_action_stage = stage
     last_recovery_seconds = recovered_in
-    actions_total[stage] = actions_total[stage] + 1
-    table.insert(action_history, { ts = last_action_ts, stage = stage })
-    cooldown_until = last_action_ts + cooldown_seconds
+    actions_total_mode_toggle = actions_total_mode_toggle + 1
 
     if post and post.nr_attached then
-        log("recovered NR via %s in %ds", stage, recovered_in)
-        consecutive_failed_actions = 0
+        log("recovered NR via mode_toggle in %ds", recovered_in)
+        cooldown_until = last_action_ts + cooldown_ok
+        on_recovery(string.format("mode_toggle in %ds", recovered_in))
     else
         consecutive_failed_actions = consecutive_failed_actions + 1
-        log("action %s did NOT recover NR within %ds (consecutive failures=%d)",
-            stage, RECOVERY_MAX_WAIT, consecutive_failed_actions)
-        if consecutive_failed_actions >= 2 then
-            capped = true
-            log("two consecutive failed actions — flagging capped, no further action this 24h window")
+        local backoff = failure_cooldown(consecutive_failed_actions)
+        cooldown_until = last_action_ts + backoff
+        log("action mode_toggle did NOT recover NR within %ds (consecutive failures=%d, next attempt in %ds)",
+            RECOVERY_MAX_WAIT, consecutive_failed_actions, backoff)
+        if alert_after_failed > 0
+                and not alerted_failed
+                and consecutive_failed_actions >= alert_after_failed then
+            notify_telegram(string.format(
+                "🔻 *%s* 5G NR recovery failed %dx in a row — next try in %dm",
+                HOSTNAME, consecutive_failed_actions, math.floor(backoff / 60)))
+            alerted_failed = true
         end
     end
-    consecutive_degraded = 0
+    -- Clamp so the next-pass log doesn't say "sample 418/5".
+    consecutive_degraded = degraded_samples
 end
 
 -- Transition-aware logging: keep the previous probe so we log only when
 -- something actually changed (modem state flipped, NR came/went, user
--- pinned LTE, capped flag toggled, etc.) instead of spamming a line per
--- 60s tick. Counters during a degradation run are still logged each
--- sample so progress toward the action threshold is visible in syslog.
+-- pinned LTE, etc.) instead of spamming a line per 60s tick.
 local last_probe = nil
-local last_capped = false
 local last_probe_err = nil
 local first_pass = true
 
 -- Restore from /var/run/5g-watchdog.state if it's recent enough.
 -- Without this, a procd respawn mid-incident loses cooldown +
--- consecutive_failed_actions and the next cycle redoes stage1 from
--- scratch instead of escalating to stage2 (and could blow past
--- daily_cap by re-zeroing action_history).
+-- consecutive_failed_actions and the next cycle re-fires at zero
+-- backoff against a wedged radio.
 do
     local prev = read_state()
     local now = os.time()
@@ -499,19 +513,33 @@ do
     if prev and prev_ts > 0 and (now - prev_ts) <= STATE_TTL then
         cooldown_until         = tonumber(prev.cooldown_until) or 0
         last_action_ts         = tonumber(prev.last_action_ts) or 0
-        last_action_stage      = prev.last_action_stage or ""
         last_recovery_seconds  = tonumber(prev.last_recovery_seconds) or 0
-        actions_total.disable_enable = tonumber(prev.actions_total_disable_enable) or 0
-        actions_total.mode_toggle    = tonumber(prev.actions_total_mode_toggle) or 0
-        consecutive_failed_actions   = tonumber(prev.consecutive_failed_actions) or 0
-        capped                 = (prev.capped == "1" or prev.capped == "true")
-        action_history         = deserialise_history(prev.action_history)
-        log("restored state from %ds ago: cooldown_until=%d failed_actions=%d actions_24h=%d capped=%s",
+        actions_total_mode_toggle  = tonumber(prev.actions_total_mode_toggle) or 0
+        consecutive_failed_actions = tonumber(prev.consecutive_failed_actions) or 0
+        nr_detached_since      = tonumber(prev.nr_detached_since) or 0
+        alerted_failed         = (prev.alerted_failed == "1")
+        alerted_detach_long    = (prev.alerted_detach_long == "1")
+        log("restored state from %ds ago: cooldown_until=%d failed_actions=%d nr_detached_since=%d alerted_failed=%s alerted_detach_long=%s",
             now - prev_ts, cooldown_until, consecutive_failed_actions,
-            actions_in_24h(), tostring(capped))
-        last_capped = capped
+            nr_detached_since, tostring(alerted_failed), tostring(alerted_detach_long))
     elseif prev and prev_ts > 0 then
         log("ignoring stale state file (%ds old, ttl=%ds)", now - prev_ts, STATE_TTL)
+    end
+end
+
+-- If we restart while NR is already detached we never see the
+-- attached→detached transition, so nr_detached_since stays 0 and the
+-- long-detach alert can never fire for this incident. Seed it now —
+-- the worst case is we slightly underestimate detach duration if the
+-- daemon was down longer than the restart gap, which is fine.
+if first_p and not first_p.nr_attached then
+    if nr_detached_since == 0 then
+        nr_detached_since = os.time()
+        log("startup: NR currently detached; seeding nr_detached_since=%d",
+            nr_detached_since)
+    else
+        log("startup: NR currently detached; carrying nr_detached_since=%d (%ds ago)",
+            nr_detached_since, os.time() - nr_detached_since)
     end
 end
 
@@ -551,15 +579,18 @@ while true do
                 end
                 if last_probe.nr_attached ~= p.nr_attached then
                     if p.nr_attached then
-                        -- Natural recovery (not driven by our action) is worth
-                        -- recording — tells us "the cell brought NR back on its
-                        -- own, before we hit the action threshold".
+                        -- Natural recovery (not driven by our action)
+                        -- is worth recording — tells us "the cell
+                        -- brought NR back on its own, before we hit
+                        -- the action threshold".
                         if last_action_ts == 0 or os.time() - last_action_ts > RECOVERY_MAX_WAIT then
                             log("NR re-attached on its own (cell-driven recovery): %s",
                                 probe_summary(p))
+                            on_recovery("cell-driven")
                         end
                     else
                         log("NR detached: %s", probe_summary(p))
+                        nr_detached_since = os.time()
                     end
                 end
             end
@@ -572,36 +603,50 @@ while true do
             end
             consecutive_degraded = 0
         elseif p.nr_attached then
+            if consecutive_failed_actions > 0 or alerted_failed or alerted_detach_long then
+                on_recovery("steady-state probe")
+            end
             consecutive_degraded = 0
-            consecutive_failed_actions = 0
         else
-            consecutive_degraded = consecutive_degraded + 1
+            -- Clamp so a long wedge doesn't grow consecutive_degraded
+            -- to 400+ and spam the log with "sample 418/5".
+            if consecutive_degraded < degraded_samples then
+                consecutive_degraded = consecutive_degraded + 1
+            end
             local now = os.time()
             local in_cooldown = now < cooldown_until
-            log("degraded sample %d/%d (nr_carriers=%d)%s",
-                consecutive_degraded, degraded_samples, p.nr_carriers or 0,
-                in_cooldown and string.format(" — cooldown active for another %ds", cooldown_until - now) or "")
+            -- Once clamped at the threshold, only log the per-sample
+            -- line on the first hit; afterwards just log the deferral
+            -- once per cooldown window.
+            if consecutive_degraded < degraded_samples then
+                log("degraded sample %d/%d (nr_carriers=%d)",
+                    consecutive_degraded, degraded_samples, p.nr_carriers or 0)
+            end
             if consecutive_degraded >= degraded_samples then
                 if in_cooldown then
-                    log("threshold reached but cooldown active until %d (in %ds); deferring",
-                        cooldown_until, cooldown_until - now)
-                elseif actions_in_24h() >= daily_cap then
-                    log("threshold reached but daily cap (%d) hit; will not act in this 24h window",
-                        daily_cap)
+                    -- Single line per minute is fine — this is the
+                    -- main "what's the watchdog doing right now"
+                    -- breadcrumb when wedged.
+                    log("threshold reached, cooldown active for another %ds (failures=%d)",
+                        cooldown_until - now, consecutive_failed_actions)
                 else
                     log("NR SCG dropped past hysteresis (%s) — taking action", probe_summary(p))
                     take_action()
                 end
             end
-        end
 
-        if capped ~= last_capped then
-            if capped then
-                log("entering capped state (no further action this 24h window)")
-            else
-                log("clearing capped state — resuming normal operation")
+            -- Long-detach alert: fires once per incident, independent
+            -- of any cooldown. Catches the case where NR has been down
+            -- for ages and we're stuck in backoff.
+            if alert_detach_secs > 0
+                    and not alerted_detach_long
+                    and nr_detached_since > 0
+                    and (now - nr_detached_since) >= alert_detach_secs then
+                notify_telegram(string.format(
+                    "🔻 *%s* 5G NR detached for %dm (LTE-only)",
+                    HOSTNAME, math.floor((now - nr_detached_since) / 60)))
+                alerted_detach_long = true
             end
-            last_capped = capped
         end
 
         emit_state(p)
