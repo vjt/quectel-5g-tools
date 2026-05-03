@@ -338,14 +338,15 @@ local HOSTNAME = hostname()
 
 -- Telegram POST is backgrounded + capped at 10s so a hung api.telegram.org
 -- call can't stall the watchdog loop. We still log the attempt so syslog
--- has a record even if the API never replies.
+-- has a record even if the API never replies. parse_mode is intentionally
+-- omitted: Markdown chokes on underscores (e.g. `mode_toggle` in the
+-- recovery message) and would silently 400 the request.
 local function notify_telegram(text)
     if not tg_enabled() then return end
     log("telegram alert: %s", text)
     local cmd = string.format(
         "(curl -sS --max-time 10 " ..
         "-d chat_id=%s " ..
-        "-d parse_mode=Markdown " ..
         "--data-urlencode text=%q " ..
         "'https://api.telegram.org/bot%s/sendMessage' " ..
         ">/dev/null 2>&1) &",
@@ -444,7 +445,7 @@ end
 local function on_recovery(reason)
     local was_alerted = alerted_failed or alerted_detach_long
     if was_alerted then
-        notify_telegram(string.format("✅ *%s* 5G NR back (%s)", HOSTNAME, reason))
+        notify_telegram(string.format("✅ %s 5G NR back (%s)", HOSTNAME, reason))
     end
     consecutive_failed_actions = 0
     nr_detached_since = 0
@@ -486,7 +487,7 @@ local function take_action()
                 and not alerted_failed
                 and consecutive_failed_actions >= alert_after_failed then
             notify_telegram(string.format(
-                "🔻 *%s* 5G NR recovery failed %dx in a row — next try in %dm",
+                "🔻 %s 5G NR recovery failed %dx in a row — next try in %dm",
                 HOSTNAME, consecutive_failed_actions, math.floor(backoff / 60)))
             alerted_failed = true
         end
@@ -643,7 +644,7 @@ while true do
                     and nr_detached_since > 0
                     and (now - nr_detached_since) >= alert_detach_secs then
                 notify_telegram(string.format(
-                    "🔻 *%s* 5G NR detached for %dm (LTE-only)",
+                    "🔻 %s 5G NR detached for %dm (LTE-only)",
                     HOSTNAME, math.floor((now - nr_detached_since) / 60)))
                 alerted_detach_long = true
             end
