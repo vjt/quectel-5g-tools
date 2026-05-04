@@ -1,20 +1,25 @@
 #!/usr/bin/env lua
 -- 5g-watchdog: detect NSA 5G NR SCG drops on the RM520N and force a
--- re-attach via ModemManager.
+-- re-attach via ModemManager + netifd.
 --
 -- Failure mode targeted: the modem stays attached to the LTE master
 -- but the cell does not (re)add the NR secondary carrier, so the
 -- bearer keeps working at LTE-only throughput. Recovery requires the
 -- UE to re-advertise NSA capability on a fresh attach.
 --
--- Recovery action: mmcli --set-allowed-modes='4g' then restore (RAT
--- toggle, forces firmware to drop+restart NR measurements). Empirical
--- 7-day data on jeeves: 100% recovery rate, ~33s. The previous
--- two-stage design that tried `mmcli --disable + --enable` first was
--- removed — that "stage 1" had a 0% real recovery rate (its rare
--- successes lined up exactly with the polling boundary, i.e. cell-
--- driven recovery happening to coincide with our wait window) and only
--- wasted 60s + a budget slot before stage 2 fired anyway.
+-- Recovery is two stages per cycle:
+--   * stage 1 — mode_toggle: mmcli --set-allowed-modes='4g' then
+--     restore. Forces firmware to drop+restart NR measurements at the
+--     RAT layer. Cheap, modem stays connected.
+--   * stage 2 — bearer_reconnect: `ifdown <iface>; sleep 5; ifup <iface>`.
+--     Brings the netifd / MM bearer down and back up, forcing a fresh
+--     PDN attach. Heavier (LTE blip too) but covers the case where
+--     mode_toggle leaves the bearer's "no SCG" cache stuck. Confirmed
+--     2026-05-04 incident: 3× mode_toggle + 1× COPS toggle all failed,
+--     `ifdown wwan; ifup wwan` recovered NR in seconds on the same n78
+--     cell that had been "missing" the whole time.
+-- A cycle succeeds if EITHER stage gets NR back. Only if BOTH fail does
+-- the cycle count as a failure for the backoff counter.
 --
 -- Detection vs recovery split:
 --
@@ -36,10 +41,12 @@
 -- Backoff model (replaces the old 24h-window daily_cap):
 --   * After a successful recovery: cooldown_ok (default 300s) — give
 --     the cell a chance to settle before we test it again.
---   * After a failed recovery: cooldown_fail (default 1800s, doubles
---     each consecutive failure up to cooldown_fail_max) — back off so
---     we don't flap a wedged radio. Resets on next success or
---     cell-driven recovery.
+--   * After a failed CYCLE (both stages exhausted): cooldown_fail
+--     (default 300s, doubles each consecutive failure up to
+--     cooldown_fail_max=1800s/30min) — back off so we don't flap a
+--     wedged radio, but stay aggressive (worst-case wait between
+--     cycles is 30min, not 4h). Resets on next success or cell-driven
+--     recovery.
 --
 -- Telegram alerts (opt-in, off by default — set telegram_token and
 -- telegram_chat in UCI to enable):
@@ -182,7 +189,7 @@ local function read_state()
 end
 
 -- ---------------------------------------------------------------------
--- recovery action: mmcli mode toggle
+-- recovery actions
 -- ---------------------------------------------------------------------
 
 -- mmcli serialises `current-modes` as a single human-readable string
@@ -239,6 +246,54 @@ local function mode_toggle(idx)
     if c1 ~= 0 or c2 ~= 0 then
         log("mode_toggle: drop=%d restore=%d (non-zero) — restore cmd: %s",
             c1, c2, restore)
+        return false
+    end
+    return true
+end
+
+-- Poll `ifstatus <iface>` (netifd JSON) until `up == want` and
+-- `pending == false`. Returns true if the state is reached within
+-- timeout, false otherwise. Used by bearer_reconnect to wait for the
+-- iface to actually go down before bringing it back up, instead of a
+-- blind sleep that may race with proto-handler teardown.
+local function wait_iface_up(iface, want, timeout)
+    local poll = 1
+    local t0 = os.time()
+    while os.time() - t0 < timeout do
+        local data = run_json(string.format("ifstatus %s", iface))
+        if data and data.up == want and data.pending == false then
+            return true, os.time() - t0
+        end
+        utils.sleep(poll)
+    end
+    return false, timeout
+end
+
+-- bearer_reconnect: ifdown <iface>; wait for down; ifup <iface>. With
+-- the wwan interface using proto=modemmanager, this drives MM through a
+-- clean bearer disconnect + reconnect, which forces a fresh PDN attach
+-- and (in the failure mode this watchdog targets) clears whatever stale
+-- "no SCG" state mode_toggle can't reach. Returns true if both ifdown
+-- and ifup succeed AND netifd confirms the down transition. The "did
+-- NR come back?" check is left to the caller's measure_recovery.
+local function bearer_reconnect(iface)
+    log("bearer_reconnect: ifdown %s", iface)
+    local _, c1 = run(string.format("ifdown %s", iface))
+    if c1 ~= 0 then
+        log("bearer_reconnect: ifdown returned %d for iface=%s", c1, iface)
+        return false
+    end
+    local down_ok, down_secs = wait_iface_up(iface, false, 30)
+    if not down_ok then
+        log("bearer_reconnect: iface %s did not go down within 30s; aborting (no ifup)",
+            iface)
+        return false
+    end
+    log("bearer_reconnect: iface %s down after %ds; ifup %s",
+        iface, down_secs, iface)
+    local _, c2 = run(string.format("ifup %s", iface))
+    if c2 ~= 0 then
+        log("bearer_reconnect: ifup returned %d for iface=%s", c2, iface)
         return false
     end
     return true
@@ -312,8 +367,10 @@ local poll_interval       = quectel_uci.get_number("quectel", "watchdog", "poll_
 local degraded_samples    = quectel_uci.get_number("quectel", "watchdog", "degraded_samples", 5)
 RECOVERY_MAX_WAIT         = quectel_uci.get_number("quectel", "watchdog", "recovery_wait_seconds", 180)
 local cooldown_ok         = quectel_uci.get_number("quectel", "watchdog", "cooldown_ok", 300)
-local cooldown_fail       = quectel_uci.get_number("quectel", "watchdog", "cooldown_fail", 1800)
-local cooldown_fail_max   = quectel_uci.get_number("quectel", "watchdog", "cooldown_fail_max", 14400)
+local cooldown_fail       = quectel_uci.get_number("quectel", "watchdog", "cooldown_fail", 300)
+local cooldown_fail_max   = quectel_uci.get_number("quectel", "watchdog", "cooldown_fail_max", 1800)
+local bearer_reconnect_enabled = quectel_uci.get_bool("quectel", "watchdog", "bearer_reconnect_enabled", true)
+local bearer_iface        = quectel_uci.get_string("quectel", "watchdog", "bearer_iface", "wwan")
 local alert_after_failed  = quectel_uci.get_number("quectel", "watchdog", "alert_after_failed", 0)
 local alert_detach_secs   = quectel_uci.get_number("quectel", "watchdog", "alert_detach_seconds", 0)
 local tg_token            = quectel_uci.get_string("quectel", "watchdog", "telegram_token", "")
@@ -372,16 +429,19 @@ if not first_p then
         os.exit(1)
     end
 end
-log("started: poll=%ds hysteresis=%d recovery_wait=%ds cooldown_ok=%ds cooldown_fail=%ds (max %ds) alert_after_failed=%d alert_detach=%ds telegram=%s",
+log("started: poll=%ds hysteresis=%d recovery_wait=%ds cooldown_ok=%ds cooldown_fail=%ds (max %ds) bearer_reconnect=%s (iface=%s) alert_after_failed=%d alert_detach=%ds telegram=%s",
     poll_interval, degraded_samples, RECOVERY_MAX_WAIT, cooldown_ok,
-    cooldown_fail, cooldown_fail_max, alert_after_failed,
-    alert_detach_secs, tg_enabled() and "on" or "off")
+    cooldown_fail, cooldown_fail_max,
+    bearer_reconnect_enabled and "on" or "off", bearer_iface,
+    alert_after_failed, alert_detach_secs,
+    tg_enabled() and "on" or "off")
 
 local consecutive_degraded = 0
 local cooldown_until = 0
 local last_action_ts = 0
 local last_recovery_seconds = 0
 local actions_total_mode_toggle = 0
+local actions_total_bearer_reconnect = 0
 local consecutive_failed_actions = 0
 -- nr_detached_since: unix-ts when the current detach started (0 = NR
 -- attached or never observed detached). Reset to 0 on any recovery.
@@ -405,8 +465,9 @@ local function emit_state(p)
         cooldown_until         = cooldown_until,
         last_action_ts         = last_action_ts,
         last_recovery_seconds  = last_recovery_seconds,
-        actions_total_mode_toggle    = actions_total_mode_toggle,
-        consecutive_failed_actions   = consecutive_failed_actions,
+        actions_total_mode_toggle      = actions_total_mode_toggle,
+        actions_total_bearer_reconnect = actions_total_bearer_reconnect,
+        consecutive_failed_actions     = consecutive_failed_actions,
         nr_detached_since      = nr_detached_since,
         alerted_failed         = alerted_failed and 1 or 0,
         alerted_detach_long    = alerted_detach_long and 1 or 0,
@@ -453,6 +514,10 @@ local function on_recovery(reason)
     alerted_detach_long = false
 end
 
+-- One recovery cycle: try stage 1 (mode_toggle); if NR doesn't come
+-- back, escalate to stage 2 (bearer_reconnect) if enabled. The cycle
+-- counts as a success if either stage gets NR back, and as a failure
+-- only when both are exhausted.
 local function take_action()
     local now = os.time()
     if now < cooldown_until then return end
@@ -466,31 +531,60 @@ local function take_action()
         return
     end
 
+    -- Stage 1: mode_toggle
     mode_toggle(mm_idx)
-
+    actions_total_mode_toggle = actions_total_mode_toggle + 1
     local recovered_in, post = measure_recovery()
     last_action_ts = os.time()
     last_recovery_seconds = recovered_in
-    actions_total_mode_toggle = actions_total_mode_toggle + 1
 
     if post and post.nr_attached then
-        log("recovered NR via mode_toggle in %ds", recovered_in)
+        log("recovered NR via stage1 mode_toggle in %ds", recovered_in)
         cooldown_until = last_action_ts + cooldown_ok
         on_recovery(string.format("mode_toggle in %ds", recovered_in))
-    else
-        consecutive_failed_actions = consecutive_failed_actions + 1
-        local backoff = failure_cooldown(consecutive_failed_actions)
-        cooldown_until = last_action_ts + backoff
-        log("action mode_toggle did NOT recover NR within %ds (consecutive failures=%d, next attempt in %ds)",
-            RECOVERY_MAX_WAIT, consecutive_failed_actions, backoff)
-        if alert_after_failed > 0
-                and not alerted_failed
-                and consecutive_failed_actions >= alert_after_failed then
-            notify_telegram(string.format(
-                "🔻 %s 5G NR recovery failed %dx in a row — next try in %dm",
-                HOSTNAME, consecutive_failed_actions, math.floor(backoff / 60)))
-            alerted_failed = true
+        consecutive_degraded = degraded_samples
+        return
+    end
+
+    log("stage1 mode_toggle did NOT recover NR within %ds; %s",
+        RECOVERY_MAX_WAIT,
+        bearer_reconnect_enabled
+            and "escalating to stage2 bearer_reconnect"
+            or "stage2 bearer_reconnect disabled — counting cycle as failed")
+
+    if bearer_reconnect_enabled then
+        -- Stage 2: bearer_reconnect
+        bearer_reconnect(bearer_iface)
+        actions_total_bearer_reconnect = actions_total_bearer_reconnect + 1
+        recovered_in, post = measure_recovery()
+        last_action_ts = os.time()
+        last_recovery_seconds = recovered_in
+
+        if post and post.nr_attached then
+            log("recovered NR via stage2 bearer_reconnect in %ds", recovered_in)
+            cooldown_until = last_action_ts + cooldown_ok
+            on_recovery(string.format("bearer_reconnect in %ds", recovered_in))
+            consecutive_degraded = degraded_samples
+            return
         end
+        log("stage2 bearer_reconnect did NOT recover NR within %ds",
+            RECOVERY_MAX_WAIT)
+    end
+
+    -- Both stages exhausted (or stage 2 disabled) — count the cycle as
+    -- failed and back off.
+    consecutive_failed_actions = consecutive_failed_actions + 1
+    local backoff = failure_cooldown(consecutive_failed_actions)
+    cooldown_until = last_action_ts + backoff
+    log("recovery cycle FAILED (mode_toggle + bearer_reconnect) — consecutive failures=%d, next attempt in %ds",
+        consecutive_failed_actions, backoff)
+    if alert_after_failed > 0
+            and not alerted_failed
+            and consecutive_failed_actions >= alert_after_failed then
+        notify_telegram(string.format(
+            "🔻 %s 5G NR recovery failed %dx in a row — next try in %dm",
+            HOSTNAME, consecutive_failed_actions, math.floor(backoff / 60)))
+        alerted_failed = true
     end
     -- Clamp so the next-pass log doesn't say "sample 418/5".
     consecutive_degraded = degraded_samples
@@ -515,8 +609,9 @@ do
         cooldown_until         = tonumber(prev.cooldown_until) or 0
         last_action_ts         = tonumber(prev.last_action_ts) or 0
         last_recovery_seconds  = tonumber(prev.last_recovery_seconds) or 0
-        actions_total_mode_toggle  = tonumber(prev.actions_total_mode_toggle) or 0
-        consecutive_failed_actions = tonumber(prev.consecutive_failed_actions) or 0
+        actions_total_mode_toggle      = tonumber(prev.actions_total_mode_toggle) or 0
+        actions_total_bearer_reconnect = tonumber(prev.actions_total_bearer_reconnect) or 0
+        consecutive_failed_actions     = tonumber(prev.consecutive_failed_actions) or 0
         nr_detached_since      = tonumber(prev.nr_detached_since) or 0
         alerted_failed         = (prev.alerted_failed == "1")
         alerted_detach_long    = (prev.alerted_detach_long == "1")

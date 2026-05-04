@@ -14,8 +14,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
-PKG_VERSION:=1.3.0
-PKG_RELEASE:=2
+PKG_VERSION:=1.4.0
+PKG_RELEASE:=1
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/vjt/quectel-5g-tools.git
@@ -44,8 +44,8 @@ define Package/quectel-5g-tools/description
     - 5g-info: CLI tool for displaying modem information
     - 5g-monitor: Real-time TUI monitor with signal quality display and beeps
     - 5g-led-bars: procd service driving the GL-X3000 5G signal LEDs from RSRP
-    - 5g-watchdog: procd service that detects NSA NR SCG drops via mmcli
-      and forces a re-attach (disable/enable, mode-toggle fallback).
+    - 5g-watchdog: procd service that detects NSA NR SCG drops via AT
+      and forces a re-attach (mode_toggle, then bearer_reconnect).
     - at: Simple AT command wrapper
     - 5g-lock: Band and cell locking utility
     - Prometheus collector for prometheus-node-exporter-lua

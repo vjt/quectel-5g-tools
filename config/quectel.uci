@@ -29,11 +29,16 @@ config watchdog 'watchdog'
 	# cooldown after a successful recovery — give the cell a chance to
 	# settle before we test it again
 	option cooldown_ok '300'
-	# cooldown after a failed recovery; doubles each consecutive failure
-	# up to cooldown_fail_max (4h). Resets on next success / cell-driven
-	# recovery.
-	option cooldown_fail '1800'
-	option cooldown_fail_max '14400'
+	# cooldown after a failed CYCLE (both stages exhausted); doubles
+	# each consecutive failure up to cooldown_fail_max (30min). Resets
+	# on next success / cell-driven recovery.
+	option cooldown_fail '300'
+	option cooldown_fail_max '1800'
+	# Stage 2: bearer reconnect (ifdown/ifup the wwan iface) — covers
+	# the case where stage 1 mode_toggle leaves the bearer's "no SCG"
+	# cache stuck. Set to 0 to fall back to mode_toggle-only.
+	option bearer_reconnect_enabled '1'
+	option bearer_iface 'wwan'
 	# Telegram alerts (opt-in: leave token/chat empty to disable). Two
 	# independent triggers, both off by default (set the seconds/count
 	# to a non-zero value to enable).
