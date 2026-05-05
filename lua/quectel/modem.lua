@@ -124,6 +124,9 @@ function M:open()
             termios.lflag = 0
             -- CS8 | CREAD | CLOCAL (8N1, enable receiver, ignore modem control)
             termios.cflag = 0x8B0
+            -- Set baud rate to 115200 explicitly
+            if posix.cfsetispeed and posix.cfsetospeed and posix.B115200 then
+                posix.cfsetispeed(termios, posix.B115200)
                 posix.cfsetospeed(termios, posix.B115200)
             end
             posix.tcsetattr(fd, posix.TCSANOW, termios)
@@ -168,6 +171,10 @@ function M:send(command)
         if not ok then return nil, err end
     end
 
+    -- Flush stale input data from previous commands
+    while true do
+        local data = posix.read(self.fd, 1024)
+        if not data or #data == 0 then break end
     end
 
     -- Send command
@@ -182,6 +189,8 @@ function M:send(command)
 
     -- Read response with timeout using non-blocking reads
     local response = {}
+    local total_len = 0
+    local MAX_RESPONSE = 65536
 
     local start_time = utils.now()
     local last_read_time = utils.now()
@@ -195,13 +204,46 @@ function M:send(command)
         local data = posix.read(self.fd, 1024)
         if data and #data > 0 then
             table.insert(response, data)
+            total_len = total_len + #data
             last_read_time = utils.now()
 
-            end
+            -- Cap response size to prevent memory exhaustion
+            -- If capped, we still need to read and discard until terminator to avoid
+            -- leaving stale data in the buffer for the next command
+            local capped = total_len > MAX_RESPONSE
 
             -- Check for end of response
             local full = table.concat(response)
             if full:match("\r\nOK\r\n$") or full:match("\r\nERROR\r\n$") then
+                if capped then
+                    -- Response was too large, we have the truncated data but need to
+                    -- flush any remaining data until we timeout or find terminator
+                    -- (which we already found, so just break and return truncated)
+                end
+                break
+            end
+
+            if capped then
+                -- Continue reading and discarding to flush the buffer
+                -- Don't store the data, just read until we see terminator or timeout
+                response = {table.concat(response)}  -- Keep what we have so far
+                while true do
+                    local discard = posix.read(self.fd, 4096)
+                    if not discard or #discard == 0 then
+                        if utils.now() - last_read_time > 1 then break end
+                        utils.sleep(0.05)
+                    else
+                        last_read_time = utils.now()
+                        -- Check if discard buffer contains terminator
+                        if discard:match("\r\nOK\r\n") or discard:match("\r\nERROR\r\n") then
+                            break
+                        end
+                    end
+                    -- Safety timeout
+                    if utils.now() - start_time > self.timeout then
+                        break
+                    end
+                end
                 break
             end
         else
