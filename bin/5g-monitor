@@ -43,7 +43,6 @@ local function cleanup()
     io.write(display.Colors.RESET)
     io.flush()
     if modem then
-        modem:close()
     end
 end
 
@@ -96,11 +95,10 @@ end
 local function main_loop()
     while running do
         -- Get modem status
-        local ok, status = pcall(function() return modem:get_status() end)
+        local ok, status = pcall(function() return modem:with(function(m) return m:get_status() end) end)
         if not ok then
             status = {}
         end
-        modem:close()
 
         -- Clear screen and move cursor home, hide cursor
         io.write(display.CLEAR .. display.HOME .. display.HIDE_CURSOR)
