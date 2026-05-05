@@ -81,14 +81,11 @@ end
 --- Check if two cells are the same based on PCI and ARFCN
 -- @param a First cell (must have pci and arfcn fields)
 -- @param b Second cell (must have pci and arfcn fields)
--- @return true if cells match by PCI or ARFCN
+-- @return true if cells match by PCI and ARFCN
 function M.same_cell(a, b)
     if not a or not b then return false end
-
-    local pci_match = a.pci and b.pci and a.pci == b.pci
-    local arfcn_match = a.arfcn and b.arfcn and a.arfcn == b.arfcn
-
-    return pci_match or arfcn_match
+    if not a.pci or not b.pci or not a.arfcn or not b.arfcn then return false end
+    return a.pci == b.pci and a.arfcn == b.arfcn
 end
 
 --- Add frequency and bandwidth info to a serving cell structure
