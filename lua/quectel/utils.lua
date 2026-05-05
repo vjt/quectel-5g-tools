@@ -8,6 +8,19 @@ local frequency = require("quectel.frequency")
 -- Load posix.time for sleep (optional, graceful fallback)
 local posix_time_ok, posix_time = pcall(require, "posix.time")
 
+--- Get current time with monotonic clock if available
+-- Returns seconds as float with nanosecond precision when possible
+-- Falls back to os.time() if posix.time unavailable
+-- @return Current time in seconds
+function M.now()
+    if posix_time_ok and posix_time.clock_gettime then
+        local ts = posix_time.clock_gettime(posix_time.CLOCK_MONOTONIC)
+        return ts.tv_sec + ts.tv_nsec / 1e9
+    else
+        return os.time()
+    end
+end
+
 --- Sleep for specified seconds using nanosleep
 -- Falls back to os.execute if posix.time unavailable
 -- @param seconds Number of seconds to sleep (can be fractional)

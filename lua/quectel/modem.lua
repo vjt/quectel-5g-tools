@@ -164,19 +164,19 @@ function M:send(command)
 
     -- Read response with timeout using non-blocking reads
     local response = {}
-    local start_time = os.time()
-    local last_read_time = os.time()
+    local start_time = utils.now()
+    local last_read_time = utils.now()
 
     while true do
         -- Check overall timeout
-        if os.time() - start_time > self.timeout then
+        if utils.now() - start_time > self.timeout then
             break
         end
 
         local data = posix.read(self.fd, 1024)
         if data and #data > 0 then
             table.insert(response, data)
-            last_read_time = os.time()
+            last_read_time = utils.now()
 
             -- Check for end of response
             local full = table.concat(response)
@@ -186,7 +186,7 @@ function M:send(command)
         else
             -- No data available, small delay before retry
             -- But if we've been waiting too long since last data, give up
-            if os.time() - last_read_time > 1 then
+            if utils.now() - last_read_time > 1 then
                 break
             end
             utils.sleep(0.05)
