@@ -143,6 +143,20 @@ function M:close()
     end
 end
 
+--- Execute function with modem open, ensuring close() is called even on error
+-- RAII helper for safe resource management
+-- @param fn Function to execute with modem as argument
+-- @return Result of fn, or throws error
+function M:with(fn)
+    local ok, err = self:open()
+    if not ok then error("modem open failed: " .. tostring(err)) end
+    return (function(success, ...)
+        self:close()
+        if not success then error((...), 0) end
+        return ...
+    end)(pcall(fn, self))
+end
+
 --- Send AT command and read response
 -- @param command AT command (without trailing \r\n)
 -- @return Response string, or nil + error
