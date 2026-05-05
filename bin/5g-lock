@@ -123,13 +123,13 @@ if action == "reset" then
     print("")
 
     -- Reset bands
-    if modem:set_bands("lte_band", {}) then
+    if pcall(function() modem:set_bands("lte_band", {}) end) then
         print("  LTE bands: reset to all")
     else
         io.stderr:write("  Failed to reset LTE bands\n")
     end
 
-    if modem:set_bands("nsa_nr5g_band", {}) then
+    if pcall(function() modem:set_bands("nsa_nr5g_band", {}) end) then
         print("  5G NR bands: reset to all")
     else
         io.stderr:write("  Failed to reset 5G NR bands\n")
@@ -138,7 +138,7 @@ if action == "reset" then
     -- Clear cell locks (only if active)
     local lte_lock = modem:get_cell_lock("common/4g")
     if lte_lock and lte_lock.num_cells > 0 then
-        if modem:clear_cell_lock("common/4g") then
+        if pcall(function() modem:clear_cell_lock("common/4g") end) then
             print("  LTE cell lock: cleared")
         else
             io.stderr:write("  Failed to clear LTE cell lock\n")
@@ -149,7 +149,7 @@ if action == "reset" then
 
     local nr_lock = modem:get_cell_lock("common/5g")
     if nr_lock and nr_lock.num_cells > 0 then
-        if modem:clear_cell_lock("common/5g") then
+        if pcall(function() modem:clear_cell_lock("common/5g") end) then
             print("  5G NR cell lock: cleared")
         else
             io.stderr:write("  Failed to clear 5G NR cell lock\n")
@@ -200,13 +200,13 @@ if action == "apply" then
         local band_str = table.concat(config.lte_bands, ":")
         print(string.format("  LTE bands: %s", band_str))
 
-        if modem:set_bands("lte_band", config.lte_bands) then
+        if pcall(function() modem:set_bands("lte_band", config.lte_bands) end) then
             print("    OK")
         else
             io.stderr:write("    Failed\n")
         end
     else
-        if modem:set_bands("lte_band", {}) then
+        if pcall(function() modem:set_bands("lte_band", {}) end) then
             print("  LTE bands: reset to all")
         else
             io.stderr:write("  Failed to reset LTE bands\n")
@@ -217,13 +217,13 @@ if action == "apply" then
         local band_str = table.concat(config.nr5g_bands, ":")
         print(string.format("  5G NR bands: %s", band_str))
 
-        if modem:set_bands("nsa_nr5g_band", config.nr5g_bands) then
+        if pcall(function() modem:set_bands("nsa_nr5g_band", config.nr5g_bands) end) then
             print("    OK")
         else
             io.stderr:write("    Failed\n")
         end
     else
-        if modem:set_bands("nsa_nr5g_band", {}) then
+        if pcall(function() modem:set_bands("nsa_nr5g_band", {}) end) then
             print("  5G NR bands: reset to all")
         else
             io.stderr:write("  Failed to reset 5G NR bands\n")
@@ -238,7 +238,7 @@ if action == "apply" then
         end
         print(string.format("  LTE cell lock: %s", table.concat(parts, ", ")))
 
-        if modem:set_cell_lock_4g(config.lte_cells) then
+        if pcall(function() modem:set_cell_lock_4g(config.lte_cells) end) then
             print("    OK")
         else
             io.stderr:write("    Failed\n")
@@ -246,7 +246,7 @@ if action == "apply" then
     else
         local lte_lock = modem:get_cell_lock("common/4g")
         if lte_lock and lte_lock.num_cells > 0 then
-            if modem:clear_cell_lock("common/4g") then
+            if pcall(function() modem:clear_cell_lock("common/4g") end) then
                 print("  LTE cell lock: cleared")
             else
                 io.stderr:write("  Failed to clear LTE cell lock\n")
@@ -261,7 +261,7 @@ if action == "apply" then
         print(string.format("  5G NR cell lock: PCI %d ARFCN %d SCS %d Band %d",
             cell.pci, cell.arfcn, cell.scs, cell.band))
 
-        if modem:set_cell_lock_5g(config.nr5g_cells) then
+        if pcall(function() modem:set_cell_lock_5g(config.nr5g_cells) end) then
             print("    OK")
         else
             io.stderr:write("    Failed\n")
@@ -269,7 +269,7 @@ if action == "apply" then
     else
         local nr_lock = modem:get_cell_lock("common/5g")
         if nr_lock and nr_lock.num_cells > 0 then
-            if modem:clear_cell_lock("common/5g") then
+            if pcall(function() modem:clear_cell_lock("common/5g") end) then
                 print("  5G NR cell lock: cleared")
             else
                 io.stderr:write("  Failed to clear 5G NR cell lock\n")
