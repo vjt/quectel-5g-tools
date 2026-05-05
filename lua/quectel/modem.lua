@@ -143,6 +143,20 @@ function M:close()
     end
 end
 
+--- Execute function with modem, ensuring cleanup
+-- Opens modem, executes fn, and guarantees close() even on error
+-- @param fn Function to execute with modem as argument
+-- @return Returns whatever fn returns, or throws error
+function M:with(fn)
+    local ok, err = self:open()
+    if not ok then error("modem open failed: " .. tostring(err)) end
+    return (function(success, ...)
+        self:close()
+        if not success then error((...), 0) end
+        return ...
+    end)(pcall(fn, self))
+end
+
 --- Send AT command and read response
 -- @param command AT command (without trailing \r\n)
 -- @return Response string, or nil + error
@@ -164,19 +178,20 @@ function M:send(command)
 
     -- Read response with timeout using non-blocking reads
     local response = {}
-    local start_time = os.time()
-    local last_read_time = os.time()
+
+    local start_time = utils.now()
+    local last_read_time = utils.now()
 
     while true do
         -- Check overall timeout
-        if os.time() - start_time > self.timeout then
+        if utils.now() - start_time > self.timeout then
             break
         end
 
         local data = posix.read(self.fd, 1024)
         if data and #data > 0 then
             table.insert(response, data)
-            last_read_time = os.time()
+            last_read_time = utils.now()
 
             -- Check for end of response
             local full = table.concat(response)
@@ -186,7 +201,7 @@ function M:send(command)
         else
             -- No data available, small delay before retry
             -- But if we've been waiting too long since last data, give up
-            if os.time() - last_read_time > 1 then
+            if utils.now() - last_read_time > 1 then
                 break
             end
             utils.sleep(0.05)
@@ -200,7 +215,7 @@ end
 -- @return Table with manufacturer, model, revision
 function M:get_device_info()
     local resp, err = self:send("ATI")
-    if not resp then return nil, err end
+    if not resp then error("get_device_info failed: " .. tostring(err)) end
     return parser.parse_ati(resp)
 end
 
@@ -208,7 +223,7 @@ end
 -- @return Table with operator, mcc_mnc
 function M:get_operator()
     local resp, err = self:send("AT+QSPN")
-    if not resp then return nil, err end
+    if not resp then error("get_operator failed: " .. tostring(err)) end
     return parser.parse_qspn(resp)
 end
 
@@ -216,7 +231,7 @@ end
 -- @return Table with state, lte, nr5g
 function M:get_serving_cell()
     local resp, err = self:send('AT+QENG="servingcell"')
-    if not resp then return nil, err end
+    if not resp then error("get_serving_cell failed: " .. tostring(err)) end
     return parser.parse_serving_cell(resp)
 end
 
@@ -224,7 +239,7 @@ end
 -- @return Table with pcc, scc
 function M:get_ca_info()
     local resp, err = self:send("AT+QCAINFO")
-    if not resp then return nil, err end
+    if not resp then error("get_ca_info failed: " .. tostring(err)) end
     return parser.parse_qcainfo(resp)
 end
 
@@ -232,7 +247,7 @@ end
 -- @return List of neighbour cells
 function M:get_neighbours()
     local resp, err = self:send('AT+QENG="neighbourcell"')
-    if not resp then return nil, err end
+    if not resp then error("get_neighbours failed: " .. tostring(err)) end
     return parser.parse_neighbours(resp)
 end
 
@@ -240,14 +255,14 @@ end
 -- @return IMEI string
 function M:get_imei()
     local resp, err = self:send("AT+GSN")
-    if not resp then return nil, err end
+    if not resp then error("get_imei failed: " .. tostring(err)) end
     for line in resp:gmatch("[^\r\n]+") do
         line = line:match("^%s*(.-)%s*$")
         if line:match("^%d+$") then
             return line
         end
     end
-    return nil
+    error("get_imei: no IMEI found in response")
 end
 
 --- Get current band configuration
@@ -255,7 +270,7 @@ end
 -- @return Setting value (string or table of bands)
 function M:get_band_config(setting)
     local resp, err = self:send('AT+QNWPREFCFG="' .. setting .. '"')
-    if not resp then return nil, err end
+    if not resp then error("get_band_config failed: " .. tostring(err)) end
     local _, value = parser.parse_qnwprefcfg(resp)
     return value
 end
