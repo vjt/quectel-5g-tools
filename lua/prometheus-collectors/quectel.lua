@@ -10,6 +10,8 @@
 -- The metric() function returns an outputter - call it once per metric name,
 -- then use the returned function for each value.
 
+-- luacheck: globals metric
+
 local quectel = require("quectel")
 
 local function scrape()

@@ -106,7 +106,9 @@ end
 -- @param text AT+QSPN response
 -- @return Table with operator name, short name, mcc_mnc
 function M.parse_qspn(text)
-    for values in M.parse_response(text, "+QSPN") do
+    local iter = M.parse_response(text, "+QSPN")
+    local values = iter()
+    if values then
         return {
             operator = values[1] or "",
             operator_short = values[2] or "",
@@ -332,22 +334,25 @@ end
 -- @param text AT+QNWPREFCFG response
 -- @return setting name, value (string or table of bands)
 function M.parse_qnwprefcfg(text)
-    for values in M.parse_response(text, "+QNWPREFCFG") do
-        local setting = values[1]
-        local value = values[2]
-
-        -- Parse band lists like "1:3:7:20"
-        if setting:match("band$") and value then
-            local bands = {}
-            for band in value:gmatch("(%d+)") do
-                table.insert(bands, tonumber(band))
-            end
-            return setting, bands
-        end
-
-        return setting, value
+    local iter = M.parse_response(text, "+QNWPREFCFG")
+    local values = iter()
+    if not values then
+        return nil, nil
     end
-    return nil, nil
+
+    local setting = values[1]
+    local value = values[2]
+
+    -- Parse band lists like "1:3:7:20"
+    if setting:match("band$") and value then
+        local bands = {}
+        for band in value:gmatch("(%d+)") do
+            table.insert(bands, tonumber(band))
+        end
+        return setting, bands
+    end
+
+    return setting, value
 end
 
 --- Parse +QNWPREFCFG multi-line response for a specific setting

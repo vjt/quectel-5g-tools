@@ -8,6 +8,8 @@
 -- doesn't blow up — the absence of `quectel_watchdog_*` series is
 -- itself a useful alert signal.
 
+-- luacheck: globals metric
+
 local STATE_PATH = "/var/run/5g-watchdog.state"
 
 local function read_state()
