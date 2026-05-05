@@ -1,5 +1,11 @@
 # quectel-5g-tools
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/vjt/quectel-5g-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/vjt/quectel-5g-tools/actions/workflows/ci.yml)
+[![Lua](https://img.shields.io/badge/Lua-5.1-2C2D72.svg?logo=lua)](https://www.lua.org/)
+[![OpenWrt](https://img.shields.io/badge/OpenWrt-22.03+-00B5E2.svg)](https://openwrt.org/)
+[![GL-X3000](https://img.shields.io/badge/Hardware-GL--X3000-EB2227.svg)](https://sindro.me/posts/2026-04-30-glinet-gl-x3000-vanilla-openwrt-25-12/)
+
 Tools for monitoring, configuring, and *babysitting* Quectel 5G modems
 on OpenWrt.
 
