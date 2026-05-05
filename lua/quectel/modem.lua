@@ -124,6 +124,11 @@ function M:open()
             termios.lflag = 0
             -- CS8 | CREAD | CLOCAL (8N1, enable receiver, ignore modem control)
             termios.cflag = 0x8B0
+            -- Set baud rate to 115200 explicitly
+            if posix.cfsetispeed and posix.cfsetospeed and posix.B115200 then
+                posix.cfsetispeed(termios, posix.B115200)
+                posix.cfsetospeed(termios, posix.B115200)
+            end
             posix.tcsetattr(fd, posix.TCSANOW, termios)
         end
     end
@@ -166,6 +171,12 @@ function M:send(command)
         if not ok then return nil, err end
     end
 
+    -- Flush stale input data from previous commands
+    while true do
+        local data = posix.read(self.fd, 1024)
+        if not data or #data == 0 then break end
+    end
+
     -- Send command
     local cmd = command .. "\r\n"
     local written = posix.write(self.fd, cmd)
@@ -178,6 +189,8 @@ function M:send(command)
 
     -- Read response with timeout using non-blocking reads
     local response = {}
+    local total_len = 0
+    local MAX_RESPONSE = 65536
 
     local start_time = utils.now()
     local last_read_time = utils.now()
@@ -191,7 +204,13 @@ function M:send(command)
         local data = posix.read(self.fd, 1024)
         if data and #data > 0 then
             table.insert(response, data)
+            total_len = total_len + #data
             last_read_time = utils.now()
+
+            -- Cap response size to prevent memory exhaustion
+            if total_len > MAX_RESPONSE then
+                break
+            end
 
             -- Check for end of response
             local full = table.concat(response)
