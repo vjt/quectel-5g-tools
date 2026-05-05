@@ -48,7 +48,7 @@ end
 
 -- Connect to modem
 local modem = quectel.create_modem()
-local ok, status = pcall(function() return modem:get_status() end)
+local ok, status = pcall(function() return modem:with(function(m) return m:get_status() end) end)
 
 if not ok or not status then
     io.stderr:write("Error: Could not connect to modem\n")
@@ -58,7 +58,6 @@ end
 
 if output_json then
     print(display.to_json(status))
-    modem:close()
     os.exit(0)
 end
 
@@ -84,4 +83,3 @@ for _, s in ipairs(sections) do
     end
 end
 
-modem:close()

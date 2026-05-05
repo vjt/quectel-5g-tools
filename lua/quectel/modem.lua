@@ -143,6 +143,20 @@ function M:close()
     end
 end
 
+--- Execute function with modem open, ensuring close() is called even on error
+-- RAII helper for safe resource management
+-- @param fn Function to execute with modem as argument
+-- @return Result of fn, or throws error
+function M:with(fn)
+    local ok, err = self:open()
+    if not ok then error("modem open failed: " .. tostring(err)) end
+    return (function(success, ...)
+        self:close()
+        if not success then error((...), 0) end
+        return ...
+    end)(pcall(fn, self))
+end
+
 --- Send AT command and read response
 -- @param command AT command (without trailing \r\n)
 -- @return Response string, or nil + error
@@ -200,7 +214,7 @@ end
 -- @return Table with manufacturer, model, revision
 function M:get_device_info()
     local resp, err = self:send("ATI")
-    if not resp then return nil, err end
+    if not resp then error("modem command failed: " .. tostring(err)) end
     return parser.parse_ati(resp)
 end
 
@@ -208,7 +222,7 @@ end
 -- @return Table with operator, mcc_mnc
 function M:get_operator()
     local resp, err = self:send("AT+QSPN")
-    if not resp then return nil, err end
+    if not resp then error("modem command failed: " .. tostring(err)) end
     return parser.parse_qspn(resp)
 end
 
@@ -216,7 +230,7 @@ end
 -- @return Table with state, lte, nr5g
 function M:get_serving_cell()
     local resp, err = self:send('AT+QENG="servingcell"')
-    if not resp then return nil, err end
+    if not resp then error("modem command failed: " .. tostring(err)) end
     return parser.parse_serving_cell(resp)
 end
 
@@ -224,7 +238,7 @@ end
 -- @return Table with pcc, scc
 function M:get_ca_info()
     local resp, err = self:send("AT+QCAINFO")
-    if not resp then return nil, err end
+    if not resp then error("modem command failed: " .. tostring(err)) end
     return parser.parse_qcainfo(resp)
 end
 
@@ -232,7 +246,7 @@ end
 -- @return List of neighbour cells
 function M:get_neighbours()
     local resp, err = self:send('AT+QENG="neighbourcell"')
-    if not resp then return nil, err end
+    if not resp then error("modem command failed: " .. tostring(err)) end
     return parser.parse_neighbours(resp)
 end
 
@@ -240,7 +254,7 @@ end
 -- @return IMEI string
 function M:get_imei()
     local resp, err = self:send("AT+GSN")
-    if not resp then return nil, err end
+    if not resp then error("modem command failed: " .. tostring(err)) end
     for line in resp:gmatch("[^\r\n]+") do
         line = line:match("^%s*(.-)%s*$")
         if line:match("^%d+$") then
@@ -255,7 +269,7 @@ end
 -- @return Setting value (string or table of bands)
 function M:get_band_config(setting)
     local resp, err = self:send('AT+QNWPREFCFG="' .. setting .. '"')
-    if not resp then return nil, err end
+    if not resp then error("modem command failed: " .. tostring(err)) end
     local _, value = parser.parse_qnwprefcfg(resp)
     return value
 end
@@ -268,20 +282,20 @@ function M:set_bands(setting, bands)
     if bands and #bands > 0 then
         local value = table.concat(bands, ":")
         local resp, err = self:send('AT+QNWPREFCFG="' .. setting .. '",' .. value)
-        if not resp then return nil, err end
+        if not resp then error("modem command failed: " .. tostring(err)) end
         return resp:match("OK") ~= nil
     end
 
     -- Reset to all bands: query carrier policy for the full supported set
     local resp, err = self:send('AT+QNWPREFCFG="policy_band"')
-    if not resp then return nil, err end
+    if not resp then error("modem command failed: " .. tostring(err)) end
     local _, all_bands = parser.parse_qnwprefcfg_from(resp, setting)
     if not all_bands or #all_bands == 0 then
         return nil, "could not determine supported bands from policy_band"
     end
     local value = table.concat(all_bands, ":")
     resp, err = self:send('AT+QNWPREFCFG="' .. setting .. '",' .. value)
-    if not resp then return nil, err end
+    if not resp then error("modem command failed: " .. tostring(err)) end
     return resp:match("OK") ~= nil
 end
 
@@ -290,7 +304,7 @@ end
 -- @return Parsed lock info table, or nil + error
 function M:get_cell_lock(lock_type)
     local resp, err = self:send('AT+QNWLOCK="' .. lock_type .. '"')
-    if not resp then return nil, err end
+    if not resp then error("modem command failed: " .. tostring(err)) end
     return parser.parse_qnwlock(resp)
 end
 
@@ -310,7 +324,7 @@ function M:set_cell_lock_4g(cells)
     end
 
     local resp, err = self:send(cmd)
-    if not resp then return nil, err end
+    if not resp then error("modem command failed: " .. tostring(err)) end
     return resp:match("OK") ~= nil
 end
 
@@ -329,7 +343,7 @@ function M:set_cell_lock_5g(cells)
     end
 
     local resp, err = self:send(cmd)
-    if not resp then return nil, err end
+    if not resp then error("modem command failed: " .. tostring(err)) end
     return resp:match("OK") ~= nil
 end
 
@@ -338,7 +352,7 @@ end
 -- @return true on success, nil + error on failure
 function M:clear_cell_lock(lock_type)
     local resp, err = self:send('AT+QNWLOCK="' .. lock_type .. '",0')
-    if not resp then return nil, err end
+    if not resp then error("modem command failed: " .. tostring(err)) end
     return resp:match("OK") ~= nil
 end
 
