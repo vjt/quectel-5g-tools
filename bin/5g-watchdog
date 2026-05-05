@@ -307,17 +307,18 @@ local function probe()
     -- One open/close per probe — both AT calls share the lock so we
     -- only contend with the rest of quectel-5g-tools once.
     local m = Modem.new(AT_DEVICE, AT_TIMEOUT, AT_LOCK_WAIT_MS)
-    local ok, err = m:open()
-    if not ok then return nil, "modem open: " .. tostring(err) end
-    local sig, sig_err = m:get_signal_status()
-    if not sig then
-        m:close()
-        return nil, "get_signal_status: " .. tostring(sig_err)
+    local ok, sig, mode_pref = pcall(function()
+        return m:with(function(modem)
+            local sig = modem:get_signal_status()
+            -- get_band_config("mode_pref") issues AT+QNWPREFCFG="mode_pref" and
+            -- returns the raw value (e.g. "AUTO", "LTE", "NR5G", "LTE:NR5G").
+            local mode_pref = modem:get_band_config("mode_pref") or ""
+            return sig, mode_pref
+        end)
+    end)
+    if not ok then
+        return nil, tostring(sig)
     end
-    -- get_band_config("mode_pref") issues AT+QNWPREFCFG="mode_pref" and
-    -- returns the raw value (e.g. "AUTO", "LTE", "NR5G", "LTE:NR5G").
-    local mode_pref = m:get_band_config("mode_pref") or ""
-    m:close()
 
     -- Carrier aggregation breakdown: pcc + scc[] each tagged with
     -- rat="lte"|"5g". This is the modem's own view, the only one that
