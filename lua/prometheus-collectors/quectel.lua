@@ -103,6 +103,21 @@ local function scrape()
     local freq = metric("modem_frequency_mhz", "gauge")
     local bw = metric("modem_bandwidth_mhz", "gauge")
 
+    -- Operator info from the LTE serving cell (PLMN MCC/MNC). Allows
+    -- dashboards (e.g. the EnodeB stat's LTEItaly link) to derive the
+    -- operator from data rather than hardcoding a network code.
+    -- The label values are stringified integers — no zero-padding on
+    -- the MNC, matching the lteitaly.it URL format
+    -- `https://lteitaly.it/internal/map.php#bts=<MCC><MNC>.<enb>`.
+    if status.serving and status.serving.lte
+        and status.serving.lte.mcc and status.serving.lte.mnc then
+        local op = metric("modem_operator_info", "gauge")
+        op({
+            mcc = tostring(status.serving.lte.mcc),
+            mnc = tostring(status.serving.lte.mnc),
+        }, 1)
+    end
+
     -- Emit all metrics
     for _, cell in ipairs(cells) do
         local base_labels = {

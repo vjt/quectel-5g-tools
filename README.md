@@ -112,7 +112,14 @@ chmod +x /etc/init.d/5g-led-bars /etc/init.d/5g-watchdog
 cp config/quectel.uci /etc/config/quectel
 ```
 
-A ready to use Grafana dashboard (provided you have already set up metrics exporting to prometheus or victoriametrics) is [available here](https://grafana.com/grafana/dashboards/24835) (ID `24835`).
+A ready-to-use Grafana dashboard (provided you have already set up
+metrics exporting to Prometheus or VictoriaMetrics) is [available here](https://grafana.com/grafana/dashboards/24835)
+(ID `24835`).
+
+The dashboard is built from code by `grafana/generate.py` so the
+layout, queries and thresholds stay versioned alongside the metrics
+they consume — see [`grafana/README.md`](grafana/README.md). The
+generated JSON lives in [`grafana/quectel-5g-monitor.json`](grafana/quectel-5g-monitor.json).
 
 Obligatory screenshot:
 
@@ -375,6 +382,9 @@ config watchdog 'watchdog'
 │   └── mm-ignore-tty                  # Ports the patched MM should skip
 ├── tests/                             # Lua unit tests
 ├── doc/                               # Screenshots and reference PDFs
+├── grafana/                           # Dashboard generator (Python + grafanalib)
+│   ├── generate.py                    # Builds quectel-5g-monitor.json
+│   └── quectel-5g-monitor.json        # Generated dashboard (checked in)
 ├── openwrt/quectel-5g-tools/          # OpenWrt package Makefile
 └── legacy/                            # Python implementation (archived)
 ```
