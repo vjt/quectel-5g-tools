@@ -146,23 +146,38 @@ def build_panels(src: dict[int, dict]) -> list:
         {"type": "row", "title": "Connectivity", "collapsed": False, "panels": [],
          "gridPos": gp(0, 40, 24, 1)}
     )
-    # ping current stats (source ids: 4 7 8 9 32 31)
-    for i, sid in enumerate([4, 7, 8, 9, 32, 31]):
-        p = clone(src[sid], gridPos=gp(i * 4, 41, 4, 5))
-        if sid == 31:
-            # Upstream dashboard has a copy-paste bug: the sindro.me ping
-            # current stat queries `url="8.8.8.8"`. Fix here.
-            for t in p["targets"]:
-                t["expr"] = 'ping_average_response_ms{url="sindro.me", host=~"$router"}'
-        panels.append(p)
-    # $target ping metrics
+    # Ping current — single Stat panel repeated horizontally over the
+    # `$ping_url` template variable (one instance per selected URL).
+    ping_current = clone(
+        src[4],
+        gridPos=gp(0, 41, 4, 5),
+        title="$ping_url",
+        expr='ping_average_response_ms{url="$ping_url", host=~"$router"}',
+    )
+    ping_current["repeat"] = "ping_url"
+    ping_current["repeatDirection"] = "h"
+    panels.append(ping_current)
+
+    # $target ping metrics — single URL, drill-down panel.
     panels.append(clone(src[13], gridPos=gp(0, 46, 24, 10)))
     # Avg Response Time / Packet Loss %
     panels.append(clone(src[14], gridPos=gp(0, 56, 12, 8)))
     panels.append(clone(src[15], gridPos=gp(12, 56, 12, 8)))
-    # availability stats (1.1.1.1 8.8.8.8 facebook reddit google sindro = 20 19 24 21 23 22)
-    for i, sid in enumerate([20, 19, 24, 21, 23, 22]):
-        panels.append(clone(src[sid], gridPos=gp(i * 4, 64, 4, 6)))
+
+    # Availability — single Stat panel, same repeat pattern.
+    availability = clone(
+        src[20],
+        gridPos=gp(0, 64, 4, 6),
+        title="$ping_url",
+        expr=(
+            '100 - avg_over_time('
+            'ping_percent_packet_loss{url="$ping_url", host=~"$router"}[2m])'
+        ),
+    )
+    availability["repeat"] = "ping_url"
+    availability["repeatDirection"] = "h"
+    panels.append(availability)
+
     # DNS Response Time
     panels.append(clone(src[30], gridPos=gp(0, 70, 24, 7)))
 
@@ -378,6 +393,28 @@ def templating(ds_uid: str) -> dict:
                 "includeAll": False,
                 "options": [],
                 "current": {"text": "sindro.me", "value": "sindro.me"},
+                "regex": "",
+            },
+            {
+                # Drives the repeat on the ping-current + availability
+                # stats; one panel instance per selected URL.
+                "name": "ping_url",
+                "label": "ping urls",
+                "type": "query",
+                "datasource": base_ds,
+                "definition": "label_values(ping_average_response_ms,url)",
+                "query": {
+                    "qryType": 1,
+                    "query": "label_values(ping_average_response_ms,url)",
+                    "refId": "VariableQueryEditor-VariableQuery",
+                },
+                "refresh": 1,
+                "sort": 1,
+                "multi": True,
+                "includeAll": True,
+                "allValue": ".+",
+                "options": [],
+                "current": {"text": ["All"], "value": ["$__all"]},
                 "regex": "",
             },
         ]

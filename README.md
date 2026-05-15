@@ -30,11 +30,12 @@ for the migration story.
 - **5g-led-bars** — procd daemon driving the GL-X3000 panel LEDs from
   the strongest NR carrier's RSRP (falls back to LTE PCC when no NR).
 - **5g-watchdog** — procd daemon that detects NSA 5G NR SCG drops via
-  `mmcli` and forces a re-attach (`--disable`/`--enable`, with a
-  `--set-allowed-modes` toggle as a fallback). Fills a gap that
+  AT (`AT+QCAINFO`) and forces a re-attach. Fills a gap that
   ModemManager doesn't cover: when the cell silently stops
   aggregating NR while the LTE master leg stays connected, throughput
   collapses to LTE-only; the watchdog drags the modem back onto NR.
+  Two-stage recovery (`mode_toggle` → `bearer_reconnect`) with
+  exponential backoff and opt-in Telegram alerts.
 - **at** — small AT-command wrapper.
 - **Prometheus exporters** — two collectors for
   `prometheus-node-exporter-lua`: signal/cell metrics and watchdog
@@ -215,18 +216,27 @@ stays connected, so the bearer keeps working but throughput collapses
 to LTE-only. ModemManager has no policy hook for "I expected NSA
 aggregation and didn't get it" — this daemon fills that gap.
 
-Detection runs entirely off `mmcli -m N -K`; no AT serial contention,
-nothing fights MM for ownership of the modem. Two-stage recovery:
+Detection reads `AT+QCAINFO` via the shared AT serial port and treats
+NR as attached iff at least one reported carrier has rat=`5g`. The
+`mmcli` registration surface (`access-technologies`) lies during SCG
+drops and is unsafe to trust — see `feedback_nr_recovery_bearer_reconnect`
+in the project memory for the rationale. Two-stage recovery:
 
-1. `mmcli --disable` + `mmcli --enable` — NAS detach/attach.
-   ~8s of dropout, MM redials the bearer transparently.
-2. `mmcli --set-allowed-modes='4g'` then restore — RAT toggle that
-   forces the modem firmware to drop and restart NR measurements.
-   Only fires if stage 1 didn't bring NR back after the cooldown.
+1. **mode_toggle** — `mmcli --set-allowed-modes='4g'` then restore.
+   Forces the modem firmware to drop and restart NR measurements via
+   a RAT toggle. ~8 s dropout.
+2. **bearer_reconnect** — `ifdown <wwan>` then poll `ifstatus` until
+   `up=false && pending=false`, then `ifup <wwan>`. Forces a fresh
+   PDU session so the cell adds the SCG. Used when stage 1 didn't
+   bring NR back; needed in real-world cases where the modem's NAS
+   re-attaches but the existing bearer keeps a stale "no SCG" state.
 
-After two consecutive failed actions the daemon flags `capped=1` for
-Prometheus and stops trying — at that point it's an RF coverage
-issue, not something software can fix.
+A cycle counts as a success if either stage attaches NR; only when
+both fail does the cycle bump the consecutive-failed counter. Cooldown
+between cycles backs off exponentially (300 s → 1800 s cap) on
+failures and resets on success. Optional Telegram alerts fire after a
+configurable number of consecutive failed cycles or a sustained
+detached duration.
 
 Tunables in `/etc/config/quectel` under `config watchdog 'watchdog'`:
 
@@ -234,10 +244,17 @@ Tunables in `/etc/config/quectel` under `config watchdog 'watchdog'`:
 |---|---|---|
 | `enabled` | `1` | Master switch. |
 | `poll_interval` | `60` | Seconds between probes. |
-| `degraded_samples` | `5` | Consecutive degraded probes (default = 5 min) required before action. NSA NR SCG flickers on the second timescale during mobility — a high hysteresis filters that out. |
-| `cooldown` | `900` | Seconds after an action before the next action is allowed. Gives the cell time to re-add NR. |
-| `daily_cap` | `6` | Hard cap of actions per 24 h window. If we hit it the problem isn't transient; alert and stop. |
-| `enable_mode_toggle` | `1` | Allow stage 2 (mode toggle). Set to `0` to disable; only stage 1 will be tried. |
+| `degraded_samples` | `3` | Consecutive degraded probes (default ≈ 3 min) required before action. Filters out NSA SCG flicker during mobility. |
+| `recovery_wait_seconds` | `180` | Seconds to wait after each stage before re-checking NR-attached. |
+| `cooldown_ok` | `300` | Cooldown after a successful recovery cycle. |
+| `cooldown_fail` | `300` | Starting cooldown after a failed cycle; doubles each consecutive failure. |
+| `cooldown_fail_max` | `1800` | Hard cap for the exponential backoff. |
+| `bearer_reconnect_enabled` | `1` | Allow stage 2 (`ifdown`/`ifup`). Set to `0` to keep only `mode_toggle`. |
+| `bearer_iface` | `wwan` | netifd interface to bounce in stage 2. |
+| `alert_after_failed` | `0` | Send Telegram alert after N consecutive failed cycles (0 = off). |
+| `alert_detach_seconds` | `0` | Send Telegram alert when NR has been detached for this many seconds (0 = off). |
+| `telegram_token` | (empty) | Bot token; empty disables Telegram alerts entirely. |
+| `telegram_chat` | (empty) | Target chat id (string, supports negative supergroup ids). |
 
 State is published every poll to `/var/run/5g-watchdog.state` (a flat
 `key=value` file) — that's what the Prometheus collector reads. Logs
@@ -276,6 +293,7 @@ picked up by `prometheus-node-exporter-lua` automatically.
 | modem_signal_sinr_db | role, technology, band, pci | SINR |
 | modem_frequency_mhz | role, technology, band, pci | Carrier frequency |
 | modem_bandwidth_mhz | role, technology, band, pci, direction | Bandwidth |
+| modem_operator_info | mcc, mnc | 1 per scrape; PLMN from the LTE serving cell. Join via `* on() group_left(mcc, mnc)` to derive the network code for ENB-locator links. |
 
 Label values:
 - `role`: `pcc` (primary), `scc` (secondary), `nsa` (5G non-standalone)
@@ -288,24 +306,27 @@ Label values:
 | Metric | Labels | Description |
 |--------|--------|-------------|
 | quectel_watchdog_nr_attached | — | 1 if NR is currently aggregated, 0 if SCG dropped. |
-| quectel_watchdog_nr_capable | — | 1 if `5g` is in the modem's current allowed-modes (i.e., NR could be attached). |
+| quectel_watchdog_nr_carriers | — | Count of NR carriers reported by `AT+QCAINFO`. |
+| quectel_watchdog_lte_carriers | — | Count of LTE carriers (PCC + SCCs). |
+| quectel_watchdog_nr_capable | — | 1 if `5g` is in the modem's current allowed-modes. |
 | quectel_watchdog_connected | — | 1 if `mmcli` reports `state=connected`. |
-| quectel_watchdog_consecutive_degraded_samples | — | Count of consecutive polls with NR missing. Resets on recovery. |
-| quectel_watchdog_actions_total | stage=`disable_enable`\|`mode_toggle` | Cumulative recovery actions taken. |
-| quectel_watchdog_actions_24h | — | Actions taken in the trailing 24 h window. Compare against `daily_cap`. |
+| quectel_watchdog_consecutive_degraded_samples | — | Consecutive polls with NR missing. Resets on recovery. |
+| quectel_watchdog_actions_total | stage=`mode_toggle`\|`bearer_reconnect` | Cumulative recovery actions taken per stage. |
 | quectel_watchdog_last_action_timestamp_seconds | — | Unix ts of the most recent recovery action. |
 | quectel_watchdog_cooldown_until_timestamp_seconds | — | Unix ts when the current cooldown expires. |
-| quectel_watchdog_last_recovery_duration_seconds | — | Seconds between the last action and NR re-attaching (or `RECOVERY_MAX_WAIT+1` if it didn't). |
-| quectel_watchdog_consecutive_failed_actions | — | How many recovery attempts in a row failed to re-attach NR. Drives stage escalation + cap. |
-| quectel_watchdog_capped | — | 1 when the daemon has stopped acting until the 24 h window resets. Useful as a paging signal. |
+| quectel_watchdog_last_recovery_duration_seconds | — | Seconds between the last action and NR re-attaching (or `recovery_wait_seconds + 1` if it didn't). |
+| quectel_watchdog_consecutive_failed_actions | — | Recovery cycles that failed in a row. Drives the exponential backoff. |
+| quectel_watchdog_nr_detached_since_timestamp_seconds | — | Unix ts NR went detached (0 while attached). |
+| quectel_watchdog_alerted_failed | — | 1 once `alert_after_failed` Telegram alert has fired; resets on recovery. |
+| quectel_watchdog_alerted_detach_long | — | 1 once `alert_detach_seconds` Telegram alert has fired; resets on recovery. |
 | quectel_watchdog_updated_timestamp_seconds | — | Unix ts of the last state-file update — alert if it stops moving. |
 
 Suggested alert rules:
 
 - `quectel_watchdog_nr_attached == 0 for 10m` — NR has been gone
   long enough that the daemon should have acted.
-- `quectel_watchdog_capped == 1` — daemon hit its daily cap and is
-  no longer trying to recover; needs human attention.
+- `quectel_watchdog_consecutive_failed_actions >= 3` — multiple
+  recovery cycles failed; likely an RF coverage issue, not software.
 - `time() - quectel_watchdog_updated_timestamp_seconds > 300` —
   watchdog daemon has stalled or crashed.
 
@@ -335,10 +356,17 @@ config led_bars 'led_bars'
 config watchdog 'watchdog'
     option enabled '1'
     option poll_interval '60'
-    option degraded_samples '5'
-    option cooldown '900'
-    option daily_cap '6'
-    option enable_mode_toggle '1'
+    option degraded_samples '3'
+    option recovery_wait_seconds '180'
+    option cooldown_ok '300'
+    option cooldown_fail '300'
+    option cooldown_fail_max '1800'
+    option bearer_reconnect_enabled '1'
+    option bearer_iface 'wwan'
+    option alert_after_failed '0'
+    option alert_detach_seconds '0'
+    # option telegram_token '...'
+    # option telegram_chat '-100...'
 ```
 
 ## Signal Quality Thresholds
