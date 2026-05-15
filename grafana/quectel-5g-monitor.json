@@ -2180,7 +2180,7 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "ping_average_response_ms{url=\"$ping_url\", host=~\"$router\"}",
+          "expr": "ping_average_response_ms{url=~\"$ping_url\", host=~\"$router\"}",
           "format": "time_series",
           "interval": "",
           "legendFormat": "{{host}}",
@@ -2191,7 +2191,8 @@
       "title": "$ping_url",
       "type": "stat",
       "repeat": "ping_url",
-      "repeatDirection": "h"
+      "repeatDirection": "h",
+      "maxPerRow": 6
     },
     {
       "datasource": {
@@ -2347,10 +2348,10 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "ping_average_response_ms{url=\"$target\", host=~\"$router\"}",
+          "expr": "ping_average_response_ms{url=\"$ping_target\", host=~\"$router\"}",
           "format": "time_series",
           "interval": "",
-          "legendFormat": "{{host}} avg",
+          "legendFormat": "{{host}} \u2192 avg",
           "range": true,
           "refId": "A"
         },
@@ -2361,11 +2362,11 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "ping_maximum_response_ms{url=\"$target\", host=~\"$router\"}",
+          "expr": "ping_maximum_response_ms{url=\"$ping_target\", host=~\"$router\"}",
           "format": "time_series",
           "hide": false,
           "interval": "",
-          "legendFormat": "{{host}} max",
+          "legendFormat": "{{host}} \u2192 max",
           "range": true,
           "refId": "B"
         },
@@ -2376,11 +2377,11 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "ping_minimum_response_ms{url=\"$target\", host=~\"$router\"}",
+          "expr": "ping_minimum_response_ms{url=\"$ping_target\", host=~\"$router\"}",
           "format": "time_series",
           "hide": false,
           "interval": "",
-          "legendFormat": "{{host}} min",
+          "legendFormat": "{{host}} \u2192 min",
           "range": true,
           "refId": "C"
         },
@@ -2391,16 +2392,16 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "ping_percent_packet_loss{url=\"$target\", host=~\"$router\"}",
+          "expr": "ping_percent_packet_loss{url=\"$ping_target\", host=~\"$router\"}",
           "format": "time_series",
           "hide": false,
           "interval": "",
-          "legendFormat": "{{host}} loss",
+          "legendFormat": "{{host}} \u2192 loss",
           "range": true,
           "refId": "D"
         }
       ],
-      "title": "$target ping metrics",
+      "title": "$ping_target ping metrics",
       "type": "timeseries"
     },
     {
@@ -2636,11 +2637,11 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "ping_average_response_ms{host=~\"$router\"}",
+          "expr": "ping_average_response_ms{url=~\"$ping_url\", host=~\"$router\"}",
           "format": "time_series",
           "hide": false,
           "interval": "",
-          "legendFormat": "{{host}} -> {{url}}",
+          "legendFormat": "{{host}} \u2192 {{url}}",
           "range": true,
           "refId": "B"
         }
@@ -2793,11 +2794,11 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "ping_percent_packet_loss{host=~\"$router\"}",
+          "expr": "ping_percent_packet_loss{url=~\"$ping_url\", host=~\"$router\"}",
           "format": "time_series",
           "hide": false,
           "interval": "",
-          "legendFormat": "{{host}} {{url}}",
+          "legendFormat": "{{host}} \u2192 {{url}}",
           "range": true,
           "refId": "D"
         }
@@ -2877,7 +2878,7 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "100 - avg_over_time(ping_percent_packet_loss{url=\"$ping_url\", host=~\"$router\"}[2m])",
+          "expr": "100 - avg_over_time(ping_percent_packet_loss{url=~\"$ping_url\", host=~\"$router\"}[2m])",
           "format": "time_series",
           "interval": "",
           "legendFormat": "{{host}}",
@@ -2888,7 +2889,8 @@
       "title": "$ping_url",
       "type": "stat",
       "repeat": "ping_url",
-      "repeatDirection": "h"
+      "repeatDirection": "h",
+      "maxPerRow": 6
     },
     {
       "datasource": {
@@ -2986,7 +2988,7 @@
           "expr": "dns_query_query_time_ms{host=~\"$router\"}",
           "format": "time_series",
           "interval": "",
-          "legendFormat": "{{host}} -> {{server}}",
+          "legendFormat": "{{host}} \u2192 {{server}}",
           "range": true,
           "refId": "A"
         }
@@ -3736,8 +3738,8 @@
         "regex": ""
       },
       {
-        "name": "target",
-        "label": "ping target",
+        "name": "ping_target",
+        "label": "drill-down target",
         "type": "query",
         "datasource": {
           "type": "victoriametrics-metrics-datasource",

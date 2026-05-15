@@ -148,21 +148,47 @@ def build_panels(src: dict[int, dict]) -> list:
     )
     # Ping current — single Stat panel repeated horizontally over the
     # `$ping_url` template variable (one instance per selected URL).
+    # Uses `url=~"..."` (regex match): inside a repeat each instance
+    # gets a single exact value; in the fallback non-repeat render the
+    # all-value (`.+`) still matches all series. Equality match (`=`)
+    # would silently return zero series in that fallback path.
     ping_current = clone(
         src[4],
         gridPos=gp(0, 41, 4, 5),
         title="$ping_url",
-        expr='ping_average_response_ms{url="$ping_url", host=~"$router"}',
+        expr='ping_average_response_ms{url=~"$ping_url", host=~"$router"}',
     )
     ping_current["repeat"] = "ping_url"
     ping_current["repeatDirection"] = "h"
+    ping_current["maxPerRow"] = 6
     panels.append(ping_current)
 
-    # $target ping metrics — single URL, drill-down panel.
-    panels.append(clone(src[13], gridPos=gp(0, 46, 24, 10)))
-    # Avg Response Time / Packet Loss %
-    panels.append(clone(src[14], gridPos=gp(0, 56, 12, 8)))
-    panels.append(clone(src[15], gridPos=gp(12, 56, 12, 8)))
+    # Ping drill-down — single-URL focus driven by `$ping_target`. The
+    # summary panels above/below cover the multi-URL `$ping_url` set;
+    # this panel exists to show min/max/avg/loss for one URL together,
+    # which only makes sense for a single target.
+    drilldown = clone(src[13], gridPos=gp(0, 46, 24, 10), title="$ping_target ping metrics")
+    for t in drilldown["targets"]:
+        t["expr"] = t["expr"].replace('url="$target"', 'url="$ping_target"')
+        legend = t.get("legendFormat", "")
+        if "→" not in legend:
+            t["legendFormat"] = legend.replace("{{host}}", "{{host}} →")
+    panels.append(drilldown)
+    # Avg Response Time / Packet Loss % — add the same url filter.
+    avg_rt = clone(
+        src[14],
+        gridPos=gp(0, 56, 12, 8),
+        expr='ping_average_response_ms{url=~"$ping_url", host=~"$router"}',
+    )
+    avg_rt["targets"][0]["legendFormat"] = "{{host}} → {{url}}"
+    loss_pct = clone(
+        src[15],
+        gridPos=gp(12, 56, 12, 8),
+        expr='ping_percent_packet_loss{url=~"$ping_url", host=~"$router"}',
+    )
+    loss_pct["targets"][0]["legendFormat"] = "{{host}} → {{url}}"
+    panels.append(avg_rt)
+    panels.append(loss_pct)
 
     # Availability — single Stat panel, same repeat pattern.
     availability = clone(
@@ -171,15 +197,20 @@ def build_panels(src: dict[int, dict]) -> list:
         title="$ping_url",
         expr=(
             '100 - avg_over_time('
-            'ping_percent_packet_loss{url="$ping_url", host=~"$router"}[2m])'
+            'ping_percent_packet_loss{url=~"$ping_url", host=~"$router"}[2m])'
         ),
     )
     availability["repeat"] = "ping_url"
     availability["repeatDirection"] = "h"
+    availability["maxPerRow"] = 6
     panels.append(availability)
 
     # DNS Response Time
-    panels.append(clone(src[30], gridPos=gp(0, 70, 24, 7)))
+    dns = clone(src[30], gridPos=gp(0, 70, 24, 7))
+    for t in dns["targets"]:
+        if t.get("legendFormat"):
+            t["legendFormat"] = t["legendFormat"].replace("->", "→")
+    panels.append(dns)
 
     # ── Watchdog ────────────────────────────────────────────────────────
     panels.append(
@@ -377,8 +408,11 @@ def templating(ds_uid: str) -> dict:
                 "regex": "",
             },
             {
-                "name": "target",
-                "label": "ping target",
+                # Single-URL focus for the drill-down panel
+                # (`$ping_target ping metrics`). Default = sindro.me;
+                # the dropdown lists every URL in `ping_*` series.
+                "name": "ping_target",
+                "label": "drill-down target",
                 "type": "query",
                 "datasource": base_ds,
                 "definition": "label_values(ping_average_response_ms,url)",
@@ -397,7 +431,9 @@ def templating(ds_uid: str) -> dict:
             },
             {
                 # Drives the repeat on the ping-current + availability
-                # stats; one panel instance per selected URL.
+                # stats and filters the multi-URL Avg/Loss summary
+                # panels. Multi/all-aware: panels match with
+                # `url=~"$ping_url"`.
                 "name": "ping_url",
                 "label": "ping urls",
                 "type": "query",
