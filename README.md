@@ -23,6 +23,14 @@ for the migration story.
 
 ## Features
 
+Both **NSA and SA** 5G deployments are supported. The two report signal
+in different places and in a different field order: NSA carries an LTE
+anchor with the NR figures on a `NR5G-NSA` line, while in SA the serving
+cell *is* the NR cell and its `AT+QCAINFO` PCC line has no signal fields
+at all. The SA values are read from `AT+QENG="servingcell"` and merged
+onto the carriers, so LED bars, the watchdog and the Prometheus
+collector all see real numbers on either kind of network.
+
 - **5g-info** — one-shot CLI dump of modem state (table or JSON).
 - **5g-monitor** — live TUI with colour-coded signal bars and audio
   feedback; useful when aiming a directional antenna.
@@ -34,8 +42,8 @@ for the migration story.
   ModemManager doesn't cover: when the cell silently stops
   aggregating NR while the LTE master leg stays connected, throughput
   collapses to LTE-only; the watchdog drags the modem back onto NR.
-  Two-stage recovery (`mode_toggle` → `bearer_reconnect`) with
-  exponential backoff and opt-in Telegram alerts.
+  Recovery is `bearer_reconnect` with exponential backoff, plus
+  alerting when the modem stops answering AT at all.
 - **at** — small AT-command wrapper.
 - **Prometheus exporters** — two collectors for
   `prometheus-node-exporter-lua`: signal/cell metrics and watchdog
@@ -220,23 +228,38 @@ Detection reads `AT+QCAINFO` via the shared AT serial port and treats
 NR as attached iff at least one reported carrier has rat=`5g`. The
 `mmcli` registration surface (`access-technologies`) lies during SCG
 drops and is unsafe to trust — see `feedback_nr_recovery_bearer_reconnect`
-in the project memory for the rationale. Two-stage recovery:
+in the project memory for the rationale.
 
-1. **mode_toggle** — `mmcli --set-allowed-modes='4g'` then restore.
-   Forces the modem firmware to drop and restart NR measurements via
-   a RAT toggle. ~8 s dropout.
-2. **bearer_reconnect** — `ifdown <wwan>` then poll `ifstatus` until
-   `up=false && pending=false`, then `ifup <wwan>`. Forces a fresh
-   PDU session so the cell adds the SCG. Used when stage 1 didn't
-   bring NR back; needed in real-world cases where the modem's NAS
-   re-attaches but the existing bearer keeps a stale "no SCG" state.
+Recovery is a single action, **bearer_reconnect** — `ifdown <wwan>`,
+poll `ifstatus` until `up=false && pending=false`, then `ifup <wwan>`.
+That forces a fresh PDU session so the cell adds the SCG, and it works
+in the real-world case where the modem's NAS re-attaches but the
+existing bearer keeps a stale "no SCG" state.
 
-A cycle counts as a success if either stage attaches NR; only when
-both fail does the cycle bump the consecutive-failed counter. Cooldown
-between cycles backs off exponentially (300 s → 1800 s cap) on
-failures and resets on success. Optional Telegram alerts fire after a
-configurable number of consecutive failed cycles or a sustained
-detached duration.
+There used to be a cheaper first stage, `mode_toggle`
+(`mmcli --set-allowed-modes='4g'` then restore). It was removed in
+1.7.0: on 2026-08-12 a `mode_toggle` wedged the RM520N's USB-side AT
+server. The PCIe/MHI data path was unaffected, so the link looked
+perfectly healthy while every AT consumer — this watchdog included —
+went blind for 20 days. Only a host reboot cleared it; USB
+re-enumeration and a `5G_reset` GPIO pulse both failed, and the GPIO
+pulse additionally wedged PCIe with an AER `CmpltTO` storm. Lifetime
+counters at that point stood at 99 `mode_toggle` vs 49
+`bearer_reconnect`, with `bearer_reconnect` doing the actual
+recovering. A recovery action that can brick the sensor it depends on
+is a bad trade at any success rate.
+
+A cycle that attaches NR is a success; otherwise it bumps the
+consecutive-failed counter. Cooldown between cycles backs off
+exponentially (300 s → 1800 s cap) on failures and resets on success.
+
+**AT-probe health is tracked separately from modem health.** A failed
+probe means *we could not measure*, which is not the same as *NR is
+down*, and the two must never be conflated. While the probe is failing
+the watchdog freezes the last known carrier figures and publishes
+`probe_ok=0` rather than zeroing them — zeroes render on a dashboard
+as a confident, and entirely fictional, NR outage. Alert on
+`quectel_watchdog_probe_ok`.
 
 Tunables in `/etc/config/quectel` under `config watchdog 'watchdog'`:
 
@@ -245,14 +268,17 @@ Tunables in `/etc/config/quectel` under `config watchdog 'watchdog'`:
 | `enabled` | `1` | Master switch. |
 | `poll_interval` | `60` | Seconds between probes. |
 | `degraded_samples` | `3` | Consecutive degraded probes (default ≈ 3 min) required before action. Filters out NSA SCG flicker during mobility. |
-| `recovery_wait_seconds` | `180` | Seconds to wait after each stage before re-checking NR-attached. |
+| `recovery_wait_seconds` | `180` | Seconds to wait after a recovery action before re-checking NR-attached. |
 | `cooldown_ok` | `300` | Cooldown after a successful recovery cycle. |
 | `cooldown_fail` | `300` | Starting cooldown after a failed cycle; doubles each consecutive failure. |
 | `cooldown_fail_max` | `1800` | Hard cap for the exponential backoff. |
-| `bearer_reconnect_enabled` | `1` | Allow stage 2 (`ifdown`/`ifup`). Set to `0` to keep only `mode_toggle`. |
-| `bearer_iface` | `wwan` | netifd interface to bounce in stage 2. |
+| `bearer_iface` | `wwan` | netifd interface to bounce during recovery. |
 | `alert_after_failed` | `0` | Send Telegram alert after N consecutive failed cycles (0 = off). |
 | `alert_detach_seconds` | `0` | Send Telegram alert when NR has been detached for this many seconds (0 = off). |
+| `alert_probe_fail_seconds` | `900` | Send Telegram alert when the modem has not answered AT for this long (0 = off). On by default — a mute AT port is invisible from the outside. |
+| `at_mute_reboot_seconds` | `1800` | Reboot the router when AT has been mute this long **and** `bearer_iface` is down (0 = off). A mute port with a working bearer costs telemetry, not connectivity, and does not justify dropping every client — the alert covers that case. A host reboot is the only known fix for this failure mode. |
+| `reboot_min_interval_seconds` | `86400` | Never auto-reboot more than once per window. Stamped in `/etc/5g-watchdog.last-reboot` so it survives the reboot it records. |
+| `reboot_boot_grace_seconds` | `900` | Never auto-reboot within this long of coming up. With the above, stops a mute-from-boot modem causing a reboot loop. |
 | `telegram_token` | (empty) | Bot token; empty disables Telegram alerts entirely. |
 | `telegram_chat` | (empty) | Target chat id (string, supports negative supergroup ids). |
 
@@ -311,7 +337,10 @@ Label values:
 | quectel_watchdog_nr_capable | — | 1 if `5g` is in the modem's current allowed-modes. |
 | quectel_watchdog_connected | — | 1 if `mmcli` reports `state=connected`. |
 | quectel_watchdog_consecutive_degraded_samples | — | Consecutive polls with NR missing. Resets on recovery. |
-| quectel_watchdog_actions_total | stage=`mode_toggle`\|`bearer_reconnect` | Cumulative recovery actions taken per stage. |
+| quectel_watchdog_actions_total | stage=`bearer_reconnect` | Cumulative recovery actions taken. |
+| quectel_watchdog_probe_ok | | 1 when the last AT probe succeeded, 0 when the modem is unreachable. **The carrier gauges are last-known-good, not live, whenever this is 0** — alert on this. |
+| quectel_watchdog_probe_failing_since_timestamp_seconds | | Unix ts of the first failure in the current run of probe failures (0 = healthy). |
+| quectel_watchdog_last_good_probe_timestamp_seconds | | Unix ts of the last successful probe. |
 | quectel_watchdog_last_action_timestamp_seconds | — | Unix ts of the most recent recovery action. |
 | quectel_watchdog_cooldown_until_timestamp_seconds | — | Unix ts when the current cooldown expires. |
 | quectel_watchdog_last_recovery_duration_seconds | — | Seconds between the last action and NR re-attaching (or `recovery_wait_seconds + 1` if it didn't). |
@@ -361,7 +390,6 @@ config watchdog 'watchdog'
     option cooldown_ok '300'
     option cooldown_fail '300'
     option cooldown_fail_max '1800'
-    option bearer_reconnect_enabled '1'
     option bearer_iface 'wwan'
     option alert_after_failed '0'
     option alert_detach_seconds '0'

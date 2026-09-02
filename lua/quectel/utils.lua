@@ -146,4 +146,57 @@ function M.add_frequency_info(status)
     end
 end
 
+--- Backfill carrier aggregation entries with serving cell data
+-- QCAINFO reports rssnr, which is NOT the same as SINR from
+-- QENG="servingcell", and in some shapes reports no signal fields at
+-- all — notably the 5-field NR5G PCC line an SA-attached modem emits.
+-- The serving-cell reply is authoritative for RSRP/RSRQ/SINR, so we
+-- copy it onto whichever carriers match by PCI/ARFCN.
+--
+-- This is the sole path by which standalone-NR signal reaches
+-- 5g-led-bars, 5g-watchdog and the prometheus collector: without it an
+-- SA modem reports rsrp=nil and every consumer decides there is no
+-- signal on a perfectly good link (vjt/openwrt-glinet-x3000#1).
+-- @param status Status table with serving and ca fields
+function M.backfill_from_serving(status)
+    if not status.serving then return end
+    if not status.ca then return end
+
+    local lte = status.serving.lte
+    local nr = status.serving.nr5g
+
+    -- Helper to backfill a single carrier from a serving cell source
+    local function backfill_carrier(carrier, source)
+        if not source then return end
+        if not M.same_cell(carrier, source) then return end
+
+        -- Backfill signal values if missing
+        if not carrier.rsrp and source.rsrp then carrier.rsrp = source.rsrp end
+        if not carrier.rsrq and source.rsrq then carrier.rsrq = source.rsrq end
+        if not carrier.sinr and source.sinr then carrier.sinr = source.sinr end
+
+        -- Backfill bandwidth if available
+        if not carrier.bandwidth_mhz and source.bandwidth_mhz then
+            carrier.bandwidth_mhz = source.bandwidth_mhz
+        end
+    end
+
+    -- Process PCC and all SCCs against appropriate serving cell
+    local function process_carrier(carrier)
+        if carrier.rat == "5g" then
+            backfill_carrier(carrier, nr)
+        else
+            backfill_carrier(carrier, lte)
+        end
+    end
+
+    if status.ca.pcc then
+        process_carrier(status.ca.pcc)
+    end
+
+    for _, scc in ipairs(status.ca.scc or {}) do
+        process_carrier(scc)
+    end
+end
+
 return M

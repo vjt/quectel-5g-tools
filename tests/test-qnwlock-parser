@@ -2,7 +2,10 @@
 -- Test script for the QNWLOCK parser
 -- Verifies correct parsing of cell lock query responses
 
-package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;lua/?.lua;lua/?/init.lua;" .. package.path
+-- Working tree first: without this the suite silently validates whatever
+-- version of the package happens to be installed in /usr/lib/lua on the
+-- machine running it, and local edits go untested.
+package.path = "lua/?.lua;lua/?/init.lua;/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 
 local parser = require("quectel.parser")
 

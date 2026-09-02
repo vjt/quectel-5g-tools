@@ -22,6 +22,93 @@ local COMMAND_DELAY = 0.1  -- seconds between commands to reduce USB stress
 local LOCK_WAIT_MS_DEFAULT = 2000
 local LOCK_POLL_MS = 50
 
+-- ---------------------------------------------------------------------
+-- shared read cache
+-- ---------------------------------------------------------------------
+--
+-- Three daemons ask the modem the same questions on overlapping timers:
+-- the prometheus collector (per telegraf scrape, ~10s), 5g-led-bars
+-- (~60s) and 5g-watchdog (~60s), plus ad-hoc 5g-info / 5g-monitor runs.
+-- Each one took the lock and ran the same AT round-trip, so their timers
+-- periodically collided and whoever lost the race logged
+-- "Modem is locked by another process" — misleading, since nothing was
+-- actually wrong with the modem.
+--
+-- A few seconds of sharing removes the collision entirely: the first
+-- caller in a window pays the AT round-trip, everyone else reads the
+-- file and never touches the lock. Cell metrics don't move meaningfully
+-- inside one TTL, and the modem is doing the same measurement averaging
+-- internally regardless of how often we ask.
+local CACHE_DIR = "/var/run/quectel-at-cache"
+local CACHE_TTL_DEFAULT = 5
+
+-- Only read-only queries are shareable. Anything that sets state must
+-- always reach the modem, and must never be served from — or written
+-- to — the cache.
+local CACHEABLE = {
+    ["ATI"] = true,
+    ["AT+GSN"] = true,
+    ["AT+QSPN"] = true,
+    ["AT+QCAINFO"] = true,
+    ["AT+QNWINFO"] = true,
+    ['AT+QENG="servingcell"'] = true,
+    ['AT+QENG="neighbourcell"'] = true,
+}
+
+local function is_cacheable(cmd)
+    if CACHEABLE[cmd] then return true end
+    -- Query forms take a single quoted argument and nothing else; the
+    -- presence of a comma means a value follows, i.e. it's a write.
+    if cmd:match('^AT%+QNWPREFCFG="[%w_/]+"$') then return true end
+    if cmd:match('^AT%+QNWLOCK="[%w_/]+"$') then return true end
+    return false
+end
+
+local function cache_path(cmd)
+    return CACHE_DIR .. "/" .. cmd:gsub("[^%w]", "_")
+end
+
+-- Entries are "<unix-ts>\n<raw response>". Stamping the timestamp inside
+-- the file rather than leaning on mtime keeps this to plain io, and the
+-- 1s resolution of os.time() is well below any useful TTL.
+local function cache_get(cmd, ttl)
+    local f = io.open(cache_path(cmd), "r")
+    if not f then return nil end
+    local ts = tonumber(f:read("*l") or "")
+    local body = f:read("*a")
+    f:close()
+    if not ts or not body or body == "" then return nil end
+    if os.time() - ts > ttl then return nil end
+    return body
+end
+
+local function cache_put(cmd, response)
+    posix.mkdir(CACHE_DIR)  -- ignore error if exists
+    local path = cache_path(cmd)
+    local tmp = path .. ".tmp"
+    local f = io.open(tmp, "w")
+    if not f then return end
+    f:write(tostring(os.time()), "\n", response)
+    f:close()
+    os.rename(tmp, path)
+end
+
+-- Drop every cached reply. Called whenever we send something that isn't
+-- a known read-only query, i.e. anything that may have changed the
+-- modem's state. 5g-lock reads a lock back immediately after setting it
+-- to confirm it took; without this it could be shown the pre-write
+-- answer and report the wrong outcome.
+local function cache_invalidate()
+    if type(posix.dir) ~= "function" then return end
+    local ok, names = pcall(posix.dir, CACHE_DIR)
+    if not ok or type(names) ~= "table" then return end
+    for _, name in ipairs(names) do
+        if name ~= "." and name ~= ".." then
+            os.remove(CACHE_DIR .. "/" .. name)
+        end
+    end
+end
+
 --- Try to atomically create the PID-stamped lockfile, replacing it if
 -- the recorded PID no longer exists. Returns the open fd, or nil if
 -- the lock is currently held by a live process.
@@ -86,12 +173,17 @@ end
 --   this for callers that can tolerate a longer queue behind whichever
 --   helper is currently holding the lock — e.g. 5g-watchdog at startup,
 --   when 5g-led-bars / 5g-monitor may be mid-poll.
+-- @param cache_ttl Optional seconds a read-only AT reply may be shared
+--   with the other quectel-5g-tools consumers (default 5). Pass 0 to
+--   force every query onto the wire — right for one-shot diagnostics
+--   where a stale-by-seconds answer would mislead.
 -- @return Modem instance
-function M.new(device, timeout, lock_wait_ms)
+function M.new(device, timeout, lock_wait_ms, cache_ttl)
     local self = setmetatable({}, M)
     self.device = device or DEFAULT_DEVICE
     self.timeout = timeout or DEFAULT_TIMEOUT
     self.lock_wait_ms = lock_wait_ms
+    self.cache_ttl = cache_ttl or CACHE_TTL_DEFAULT
     self.fd = nil
     self.has_lock = false
     return self
@@ -147,6 +239,15 @@ end
 -- @param command AT command (without trailing \r\n)
 -- @return Response string, or nil + error
 function M:send(command)
+    -- Cache lookup happens before open() on purpose: a hit must not take
+    -- the lock at all, otherwise the contention this cache exists to
+    -- remove is still paid on every call.
+    local cacheable = self.cache_ttl > 0 and is_cacheable(command)
+    if cacheable then
+        local hit = cache_get(command, self.cache_ttl)
+        if hit then return hit end
+    end
+
     if not self.fd then
         local ok, err = self:open()
         if not ok then return nil, err end
@@ -193,7 +294,31 @@ function M:send(command)
         end
     end
 
-    return table.concat(response)
+    local full = table.concat(response)
+
+    -- An empty reply is a failure, not an empty result. The port opened,
+    -- we wrote the command, and the modem said nothing at all — that
+    -- means the AT server is mute (2026-08-12: the RM520N's USB AT
+    -- endpoint died while MBIM kept working).
+    --
+    -- Returning "" here used to let the parsers hand back a well-formed
+    -- table with every field nil, which callers then read as a genuine
+    -- "no carriers, not connected" — so a mute modem was indistinguishable
+    -- from a real outage all the way up the stack. Fail loudly instead.
+    if full == "" then
+        return nil, string.format("no response from %s (mute after %.1fs)",
+            self.device, self.timeout)
+    end
+
+    if cacheable then
+        cache_put(command, full)
+    else
+        -- Not a known read-only query, so assume it changed something
+        -- and stop serving anyone the pre-change view.
+        cache_invalidate()
+    end
+
+    return full
 end
 
 --- Get device info (ATI)
@@ -342,51 +467,6 @@ function M:clear_cell_lock(lock_type)
     return resp:match("OK") ~= nil
 end
 
---- Backfill carrier aggregation entries with serving cell data
--- QCAINFO reports rssnr which is NOT the same as SINR from QENG="servingcell"
--- We backfill authoritative signal data from serving cell when available
--- @param status Status table with serving and ca fields
-local function backfill_from_serving(status)
-    if not status.serving then return end
-    if not status.ca then return end
-
-    local lte = status.serving.lte
-    local nr = status.serving.nr5g
-
-    -- Helper to backfill a single carrier from a serving cell source
-    local function backfill_carrier(carrier, source)
-        if not source then return end
-        if not utils.same_cell(carrier, source) then return end
-
-        -- Backfill signal values if missing
-        if not carrier.rsrp and source.rsrp then carrier.rsrp = source.rsrp end
-        if not carrier.rsrq and source.rsrq then carrier.rsrq = source.rsrq end
-        if not carrier.sinr and source.sinr then carrier.sinr = source.sinr end
-
-        -- Backfill bandwidth if available
-        if not carrier.bandwidth_mhz and source.bandwidth_mhz then
-            carrier.bandwidth_mhz = source.bandwidth_mhz
-        end
-    end
-
-    -- Process PCC and all SCCs against appropriate serving cell
-    local function process_carrier(carrier)
-        if carrier.rat == "5g" then
-            backfill_carrier(carrier, nr)
-        else
-            backfill_carrier(carrier, lte)
-        end
-    end
-
-    if status.ca.pcc then
-        process_carrier(status.ca.pcc)
-    end
-
-    for _, scc in ipairs(status.ca.scc or {}) do
-        process_carrier(scc)
-    end
-end
-
 --- Get complete modem status
 -- Returns all information needed for monitoring/exporting
 -- @return Table with device, operator, serving, ca, neighbours
@@ -401,7 +481,7 @@ function M:get_status()
     status.neighbours = self:get_neighbours()
 
     utils.add_frequency_info(status)
-    backfill_from_serving(status)
+    utils.backfill_from_serving(status)
 
     return status
 end
@@ -410,14 +490,23 @@ end
 -- Use this for frequent polling (e.g., Prometheus) to reduce modem load
 -- Only 2 AT commands instead of 6
 -- @return Table with serving, ca (no device, operator, imei, neighbours)
+-- Both reads must succeed. Previously the errors were dropped on the
+-- floor and a status table with serving=nil, ca=nil was returned, which
+-- every caller reads as a valid "no carriers, not connected" sample —
+-- so an unreachable modem was reported as a genuine outage rather than
+-- as a failure to measure. Surface the error instead and let callers
+-- decide.
 function M:get_signal_status()
-    local status = {}
+    local serving, serr = self:get_serving_cell()
+    if not serving then return nil, serr end
 
-    status.serving = self:get_serving_cell()
-    status.ca = self:get_ca_info()
+    local ca, cerr = self:get_ca_info()
+    if not ca then return nil, cerr end
+
+    local status = { serving = serving, ca = ca }
 
     utils.add_frequency_info(status)
-    backfill_from_serving(status)
+    utils.backfill_from_serving(status)
 
     return status
 end

@@ -4,7 +4,10 @@
 --
 -- Requires: luaposix (available on OpenWRT/router)
 
-package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;lua/?.lua;lua/?/init.lua;" .. package.path
+-- Working tree first: without this the suite silently validates whatever
+-- version of the package happens to be installed in /usr/lib/lua on the
+-- machine running it, and local edits go untested.
+package.path = "lua/?.lua;lua/?/init.lua;/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 
 -- Check for required dependencies
 local ok, _ = pcall(require, "posix")

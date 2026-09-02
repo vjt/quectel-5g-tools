@@ -48,7 +48,16 @@ local function scrape()
     local nr_detached_since = metric("quectel_watchdog_nr_detached_since_timestamp_seconds", "gauge")
     local alerted_failed    = metric("quectel_watchdog_alerted_failed", "gauge")
     local alerted_detach    = metric("quectel_watchdog_alerted_detach_long", "gauge")
+    local alerted_probe     = metric("quectel_watchdog_alerted_probe_fail", "gauge")
     local updated           = metric("quectel_watchdog_updated_timestamp_seconds", "gauge")
+    -- Probe health. Everything above describes the *modem*; these three
+    -- describe whether we could actually talk to it. When probe_ok is 0
+    -- the carrier gauges are the last known good values, deliberately
+    -- frozen rather than zeroed — so alert on probe_ok, and treat the
+    -- rest as stale until it comes back.
+    local probe_ok          = metric("quectel_watchdog_probe_ok", "gauge")
+    local probe_failing     = metric("quectel_watchdog_probe_failing_since_timestamp_seconds", "gauge")
+    local last_good_probe   = metric("quectel_watchdog_last_good_probe_timestamp_seconds", "gauge")
 
     nr_attached({}, num("nr_attached"))
     nr_carriers({}, num("nr_carriers"))
@@ -59,13 +68,16 @@ local function scrape()
     cooldown_until({}, num("cooldown_until"))
     last_action({}, num("last_action_ts"))
     last_recovery({}, num("last_recovery_seconds"))
-    actions_total({ stage = "mode_toggle" }, num("actions_total_mode_toggle"))
     actions_total({ stage = "bearer_reconnect" }, num("actions_total_bearer_reconnect"))
     consecutive_failed({}, num("consecutive_failed_actions"))
     nr_detached_since({}, num("nr_detached_since"))
     alerted_failed({}, num("alerted_failed"))
     alerted_detach({}, num("alerted_detach_long"))
+    alerted_probe({}, num("alerted_probe_fail"))
     updated({}, num("updated_ts"))
+    probe_ok({}, num("probe_ok"))
+    probe_failing({}, num("probe_failing_since"))
+    last_good_probe({}, num("last_good_probe_ts"))
 end
 
 return { scrape = scrape }

@@ -2,9 +2,13 @@
 -- Test script for the QCAINFO parser
 -- Verifies correct parsing of all QCAINFO formats
 
-package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;lua/?.lua;lua/?/init.lua;" .. package.path
+-- Working tree first: without this the suite silently validates whatever
+-- version of the package happens to be installed in /usr/lib/lua on the
+-- machine running it, and local edits go untested.
+package.path = "lua/?.lua;lua/?/init.lua;/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 
 local parser = require("quectel.parser")
+local utils = require("quectel.utils")
 
 local passed = 0
 local failed = 0
@@ -182,6 +186,98 @@ setting, bands = parser.parse_qnwprefcfg_from(ue_cap_sample, "nsa_nr5g_band")
 test("setting=nsa_nr5g_band", setting == "nsa_nr5g_band")
 test("8 NR5G bands", bands and #bands == 8)
 test("includes band 78", bands and bands[7] == 78)
+print("")
+
+-- Standalone-NR samples below are real RM520N output from a T-Mobile US
+-- (310/260) device, reported in vjt/openwrt-glinet-x3000#1. SA field
+-- order differs from NSA, so these pin it down.
+print("Test 11: Serving cell NR5G-SA single-line")
+local sa_single = [[
++QENG: "servingcell","NOCONN","NR5G-SA","FDD",310,260,1C5EC3016,484,2F8D00,396250,25,3,-108,-10,15,0,-
+
+OK
+]]
+result = parser.parse_serving_cell(sa_single)
+test("mode=SA", result.mode == "SA")
+test("state=NOCONN", result.state == "NOCONN")
+test("no LTE anchor", result.lte == nil)
+test("nr5g parsed", result.nr5g ~= nil)
+test("mcc=310", result.nr5g and result.nr5g.mcc == 310)
+test("mnc=260", result.nr5g and result.nr5g.mnc == 260)
+test("cell_id=1C5EC3016", result.nr5g and result.nr5g.cell_id == "1C5EC3016")
+test("pci=484", result.nr5g and result.nr5g.pci == 484)
+test("tac=2F8D00", result.nr5g and result.nr5g.tac == "2F8D00")
+test("arfcn=396250", result.nr5g and result.nr5g.arfcn == 396250)
+test("band=25", result.nr5g and result.nr5g.band == 25)
+test("rsrp=-108", result.nr5g and result.nr5g.rsrp == -108)
+test("rsrq=-10", result.nr5g and result.nr5g.rsrq == -10)
+test("sinr=15", result.nr5g and result.nr5g.sinr == 15)
+test("scs=0", result.nr5g and result.nr5g.scs == 0)
+print("")
+
+print("Test 12: Serving cell NR5G-SA two-line")
+local sa_two_line = [[
++QENG: "servingcell","NOCONN"
++QENG: "NR5G-SA","FDD",310,260,1C5EC3016,484,2F8D00,396250,25,3,-108,-10,15,0,-
+
+OK
+]]
+result = parser.parse_serving_cell(sa_two_line)
+test("mode=SA", result.mode == "SA")
+test("state=NOCONN", result.state == "NOCONN")
+test("pci=484", result.nr5g and result.nr5g.pci == 484)
+test("rsrp=-108", result.nr5g and result.nr5g.rsrp == -108)
+test("sinr=15", result.nr5g and result.nr5g.sinr == 15)
+print("")
+
+print("Test 13: NSA field order unchanged by SA support")
+local nsa_sample = [[
++QENG: "servingcell","NOCONN","LTE","FDD",222,01,4940206,427,1350,3,5,5,BFF,-93,-11,-61,11,7,50,-
++QENG: "NR5G-NSA",222,01,920,-96,13,-11,648768,78,12,1
+
+OK
+]]
+result = parser.parse_serving_cell(nsa_sample)
+test("mode=NSA", result.mode == "NSA")
+test("LTE anchor present", result.lte ~= nil)
+test("nr pci=920", result.nr5g and result.nr5g.pci == 920)
+-- NSA tail is <rsrp>,<sinr>,<rsrq> — deliberately NOT the SA order
+test("nr rsrp=-96", result.nr5g and result.nr5g.rsrp == -96)
+test("nr sinr=13", result.nr5g and result.nr5g.sinr == 13)
+test("nr rsrq=-11", result.nr5g and result.nr5g.rsrq == -11)
+print("")
+
+print("Test 14: QCAINFO NR5G PCC (5 fields, standalone)")
+local sa_ca = [[
++QCAINFO: "PCC",396250,3,"NR5G BAND 25",484
++QCAINFO: "SCC",125530,3,"NR5G BAND 71",2,484,0,-,-
+
+OK
+]]
+result = parser.parse_qcainfo(sa_ca)
+test("PCC parsed", result.pcc ~= nil)
+test("PCC rat=5g", result.pcc and result.pcc.rat == "5g")
+test("PCC arfcn=396250", result.pcc and result.pcc.arfcn == 396250)
+test("PCC band=25", result.pcc and result.pcc.band == 25)
+test("PCC pci=484", result.pcc and result.pcc.pci == 484)
+test("one SCC", result.scc and #result.scc == 1)
+test("SCC rat=5g", result.scc[1] and result.scc[1].rat == "5g")
+test("SCC band=71", result.scc[1] and result.scc[1].band == 71)
+print("")
+
+print("Test 16: SA backfill feeds RSRP/SINR into the CA carriers")
+-- The actual bug from issue #1: in SA the QCAINFO PCC line carries no
+-- signal fields, so unless serving-cell values are backfilled onto it,
+-- every consumer (led-bars, watchdog, prometheus) sees rsrp=nil and
+-- reports "no signal" on a working link.
+local sa_status = {
+    serving = parser.parse_serving_cell(sa_single),
+    ca = parser.parse_qcainfo(sa_ca),
+}
+utils.backfill_from_serving(sa_status)
+test("PCC rsrp backfilled", sa_status.ca.pcc.rsrp == -108)
+test("PCC rsrq backfilled", sa_status.ca.pcc.rsrq == -10)
+test("PCC sinr backfilled", sa_status.ca.pcc.sinr == 15)
 print("")
 
 print("=== Results ===")

@@ -7,19 +7,24 @@
 -- bearer keeps working at LTE-only throughput. Recovery requires the
 -- UE to re-advertise NSA capability on a fresh attach.
 --
--- Recovery is two stages per cycle:
---   * stage 1 — mode_toggle: mmcli --set-allowed-modes='4g' then
---     restore. Forces firmware to drop+restart NR measurements at the
---     RAT layer. Cheap, modem stays connected.
---   * stage 2 — bearer_reconnect: `ifdown <iface>; sleep 5; ifup <iface>`.
---     Brings the netifd / MM bearer down and back up, forcing a fresh
---     PDN attach. Heavier (LTE blip too) but covers the case where
---     mode_toggle leaves the bearer's "no SCG" cache stuck. Confirmed
---     2026-05-04 incident: 3× mode_toggle + 1× COPS toggle all failed,
---     `ifdown wwan; ifup wwan` recovered NR in seconds on the same n78
---     cell that had been "missing" the whole time.
--- A cycle succeeds if EITHER stage gets NR back. Only if BOTH fail does
--- the cycle count as a failure for the backoff counter.
+-- Recovery is a single action: bearer_reconnect —
+-- `ifdown <iface>; wait for down; ifup <iface>`. This drives the netifd
+-- / MM bearer down and back up, forcing a fresh PDN attach. Confirmed
+-- 2026-05-04 incident: 3× mode_toggle + 1× COPS toggle all failed,
+-- `ifdown wwan; ifup wwan` recovered NR in seconds on the same n78 cell
+-- that had been "missing" the whole time.
+--
+-- There used to be a cheaper stage 1, mode_toggle, which dropped the
+-- radio to 4g via `mmcli --set-allowed-modes` and restored it. It is
+-- gone, and deliberately so: on 2026-08-12 a mode_toggle wedged the
+-- RM520N's USB-side AT server. The PCIe/MHI data path kept working, so
+-- the link looked healthy while every AT consumer went blind for 20
+-- days. Only a host reboot cleared it — a USB re-enumeration and a
+-- 5G_reset GPIO pulse both failed (the latter also wedged PCIe with an
+-- AER CmpltTO storm). Lifetime stats at that point were 99 mode_toggles
+-- vs 49 bearer_reconnects, with bearer_reconnect doing the actual
+-- recovering. A recovery action that can brick the sensor it depends on
+-- is a bad trade at any success rate.
 --
 -- Detection vs recovery split:
 --
@@ -31,17 +36,26 @@
 --     comes from the QMI registration surface, which keeps reporting
 --     `5gnr` after the NSA SCG has been dropped — i.e. it lies in
 --     exactly the failure mode we're trying to detect.
---   * Recovery (mode toggle) goes through mmcli. Mode changes drop the
---     bearer, and that's MM's job — driving bearer disconnect/reconnect
---     from outside MM would leave its state machine guessing. The
---     `current-modes` field we read as a pre-action snapshot is config
---     state, not the lying registration view, so trusting mmcli for it
---     is fine.
+--   * Recovery goes through netifd (`ifdown`/`ifup` on the wwan
+--     interface), which drives ModemManager's bearer state machine from
+--     the outside it already expects — the proto handler owns the
+--     bearer, so netifd is the right lever.
+--
+-- AT-mute detection (added after the 2026-08-12 incident):
+--   The probe itself can fail — modem mute, port gone, lock starved.
+--   That is NOT the same as "NR is down", and must never be reported as
+--   such. On probe failure we hold the last known carrier figures,
+--   publish probe_ok=0 plus last_good_probe_ts, alert once the outage
+--   passes alert_probe_fail_seconds, and — only if the data plane is
+--   down too — reboot as a last resort (see at_mute_reboot_seconds).
+--   The old code silently wrote zeroes for every field on probe
+--   failure, which is how "NR detached" showed on the dashboard for 20
+--   days while the modem was in fact attached the whole time.
 --
 -- Backoff model (replaces the old 24h-window daily_cap):
 --   * After a successful recovery: cooldown_ok (default 300s) — give
 --     the cell a chance to settle before we test it again.
---   * After a failed CYCLE (both stages exhausted): cooldown_fail
+--   * After a failed CYCLE: cooldown_fail
 --     (default 300s, doubles each consecutive failure up to
 --     cooldown_fail_max=1800s/30min) — back off so we don't flap a
 --     wedged radio, but stay aggressive (worst-case wait between
@@ -136,14 +150,6 @@ local function run_json(cmd)
     return parsed, 0
 end
 
-local function discover_modem_index()
-    local data = run_json("mmcli -J -L")
-    local list = data and data["modem-list"]
-    if type(list) ~= "table" or not list[1] then return nil end
-    local idx = list[1]:match("/Modem/(%d+)$")
-    return idx and tonumber(idx) or nil
-end
-
 -- ---------------------------------------------------------------------
 -- state file (atomic write + read-on-startup)
 -- ---------------------------------------------------------------------
@@ -192,65 +198,6 @@ end
 -- recovery actions
 -- ---------------------------------------------------------------------
 
--- mmcli serialises `current-modes` as a single human-readable string
--- of the form "allowed: 3g, 4g, 5g; preferred: 5g" — this is config
--- state (what the user has the radio set to), NOT the lying
--- access-technologies registration view, so it's safe to read from
--- mmcli for the pre-action snapshot. -J doesn't break this out into
--- structured fields, so we string-parse it. Returns
--- (allowed_list, preferred_string).
-local function parse_current_modes(s)
-    if not s or s == "" or s == "--" then return {}, "" end
-    local allowed_part, preferred = s:match("^%s*allowed:%s*(.-)%s*;%s*preferred:%s*(.-)%s*$")
-    if not allowed_part then
-        allowed_part = s:match("^%s*allowed:%s*(.-)%s*$") or s
-        preferred = ""
-    end
-    local list = {}
-    for m in allowed_part:gmatch("[^,%s]+") do table.insert(list, m) end
-    return list, preferred or ""
-end
-
--- Snapshot current allowed-modes + preferred-mode via mmcli, drop
--- allowed to 4g-only, wait, then restore exactly. The "drop+restore"
--- forces the firmware to re-evaluate RAT priorities and reattach NR
--- clean.
---
--- Stays on mmcli (rather than going AT) because mode changes drop the
--- bearer, and that's exactly MM's job to manage — going around MM with
--- AT+QNWPREFCFG would leave its bearer state machine guessing whether
--- the unsolicited disconnect is recoverable.
-local function mode_toggle(idx)
-    local data = run_json(string.format("mmcli -m %d -J", idx))
-    if not data or type(data.modem) ~= "table" then
-        log("mode_toggle: mmcli snapshot failed; refusing to run")
-        return false
-    end
-    local g = data.modem.generic or {}
-    local allowed, preferred = parse_current_modes(g["current-modes"])
-    if #allowed == 0 then
-        log("mode_toggle: no current allowed modes captured; refusing to run")
-        return false
-    end
-    local allowed_pipes = table.concat(allowed, "|")
-    local restore = string.format(
-        "mmcli -m %d --set-allowed-modes='%s'%s",
-        idx, allowed_pipes,
-        (preferred ~= "" and preferred ~= "none")
-            and (" --set-preferred-mode=" .. preferred) or "")
-    log("mode_toggle: drop to 4g, then restore: %s", restore)
-
-    local _, c1 = run(string.format("mmcli -m %d --set-allowed-modes='4g'", idx))
-    utils.sleep(4)
-    local _, c2 = run(restore)
-    if c1 ~= 0 or c2 ~= 0 then
-        log("mode_toggle: drop=%d restore=%d (non-zero) — restore cmd: %s",
-            c1, c2, restore)
-        return false
-    end
-    return true
-end
-
 -- Poll `ifstatus <iface>` (netifd JSON) until `up == want` and
 -- `pending == false`. Returns true if the state is reached within
 -- timeout, false otherwise. Used by bearer_reconnect to wait for the
@@ -272,8 +219,8 @@ end
 -- bearer_reconnect: ifdown <iface>; wait for down; ifup <iface>. With
 -- the wwan interface using proto=modemmanager, this drives MM through a
 -- clean bearer disconnect + reconnect, which forces a fresh PDN attach
--- and (in the failure mode this watchdog targets) clears whatever stale
--- "no SCG" state mode_toggle can't reach. Returns true if both ifdown
+-- and (in the failure mode this watchdog targets) clears the stale
+-- "no SCG" state on the bearer. Returns true if both ifdown
 -- and ifup succeed AND netifd confirms the down transition. The "did
 -- NR come back?" check is left to the caller's measure_recovery.
 local function bearer_reconnect(iface)
@@ -304,11 +251,16 @@ end
 -- ---------------------------------------------------------------------
 
 local function probe()
-    -- One open/close per probe — both AT calls share the lock so we
-    -- only contend with the rest of quectel-5g-tools once.
-    local m = Modem.new(AT_DEVICE, AT_TIMEOUT, AT_LOCK_WAIT_MS)
-    local ok, err = m:open()
-    if not ok then return nil, "modem open: " .. tostring(err) end
+    -- cache_ttl = 0: the watchdog acts on what it reads, so it always
+    -- reads the wire. The shared cache exists to keep 5g-led-bars and
+    -- the prometheus collector off the lock — with those two mostly
+    -- served from cache there is little left to contend with, which is
+    -- the point: the watchdog stops losing lock races it used to report
+    -- as "Modem is locked by another process".
+    --
+    -- The port is opened lazily by the first send() and held until
+    -- close(), so both AT calls still share a single open/close.
+    local m = Modem.new(AT_DEVICE, AT_TIMEOUT, AT_LOCK_WAIT_MS, 0)
     local sig, sig_err = m:get_signal_status()
     if not sig then
         m:close()
@@ -369,10 +321,23 @@ RECOVERY_MAX_WAIT         = quectel_uci.get_number("quectel", "watchdog", "recov
 local cooldown_ok         = quectel_uci.get_number("quectel", "watchdog", "cooldown_ok", 300)
 local cooldown_fail       = quectel_uci.get_number("quectel", "watchdog", "cooldown_fail", 300)
 local cooldown_fail_max   = quectel_uci.get_number("quectel", "watchdog", "cooldown_fail_max", 1800)
-local bearer_reconnect_enabled = quectel_uci.get_bool("quectel", "watchdog", "bearer_reconnect_enabled", true)
 local bearer_iface        = quectel_uci.get_string("quectel", "watchdog", "bearer_iface", "wwan")
 local alert_after_failed  = quectel_uci.get_number("quectel", "watchdog", "alert_after_failed", 0)
 local alert_detach_secs   = quectel_uci.get_number("quectel", "watchdog", "alert_detach_seconds", 0)
+-- How long the AT probe must fail continuously before we shout about
+-- it. This is the alarm that was missing on 2026-08-12: the modem's AT
+-- server died and nothing told anyone for 20 days.
+local alert_probe_fail_secs = quectel_uci.get_number("quectel", "watchdog", "alert_probe_fail_seconds", 900)
+-- Last-resort recovery for a mute AT port. Only a full host reboot has
+-- ever cleared this failure mode (USB re-enumeration and a 5G_reset
+-- GPIO pulse were both tried and failed on 2026-09-02), so there is no
+-- gentler rung on this ladder to try first. 0 disables.
+local at_mute_reboot_secs = quectel_uci.get_number("quectel", "watchdog", "at_mute_reboot_seconds", 1800)
+-- Don't reboot more than once per this window, and never within
+-- boot_grace of coming up — together these stop a modem that is mute
+-- from boot turning the router into a reboot loop.
+local reboot_min_interval = quectel_uci.get_number("quectel", "watchdog", "reboot_min_interval_seconds", 86400)
+local reboot_boot_grace   = quectel_uci.get_number("quectel", "watchdog", "reboot_boot_grace_seconds", 900)
 local tg_token            = quectel_uci.get_string("quectel", "watchdog", "telegram_token", "")
 local tg_chat             = quectel_uci.get_string("quectel", "watchdog", "telegram_chat", "")
 
@@ -396,8 +361,8 @@ local HOSTNAME = hostname()
 -- Telegram POST is backgrounded + capped at 10s so a hung api.telegram.org
 -- call can't stall the watchdog loop. We still log the attempt so syslog
 -- has a record even if the API never replies. parse_mode is intentionally
--- omitted: Markdown chokes on underscores (e.g. `mode_toggle` in the
--- recovery message) and would silently 400 the request.
+-- omitted: Markdown chokes on underscores (e.g. `bearer_reconnect` in
+-- the recovery message) and would silently 400 the request.
 local function notify_telegram(text)
     if not tg_enabled() then return end
     log("telegram alert: %s", text)
@@ -411,36 +376,99 @@ local function notify_telegram(text)
     os.execute(cmd)
 end
 
-log("starting up: probing modem over AT (%s)", AT_DEVICE)
+-- ---------------------------------------------------------------------
+-- last-resort recovery: reboot on a mute AT port
+-- ---------------------------------------------------------------------
 
--- Sanity check: can we reach the modem at all? If not, sleep + retry
--- once; if still bad, exit and let procd respawn us. This also catches
--- the case where the lock file is held by a wedged 5g-info / 5g-monitor
--- process across the whole startup window.
-local first_p, first_err = probe()
-if not first_p then
-    log("modem unreachable over AT (%s); sleeping 30s and retrying",
-        first_err or "?")
-    utils.sleep(30)
-    first_p, first_err = probe()
-    if not first_p then
-        log("modem still unreachable (%s); exiting (procd will respawn)",
-            first_err or "?")
-        os.exit(1)
-    end
+-- Is the data plane actually down? Deliberately narrow: netifd's view of
+-- the bearer interface, nothing else. We do NOT reach for the modem here
+-- — the whole point is that we're in this path precisely because the
+-- modem is unreachable over AT.
+local function data_plane_down()
+    local data = run_json(string.format("ifstatus %s", bearer_iface))
+    if not data then return false end     -- can't tell → assume fine
+    return data.up ~= true
 end
-log("started: poll=%ds hysteresis=%d recovery_wait=%ds cooldown_ok=%ds cooldown_fail=%ds (max %ds) bearer_reconnect=%s (iface=%s) alert_after_failed=%d alert_detach=%ds telegram=%s",
-    poll_interval, degraded_samples, RECOVERY_MAX_WAIT, cooldown_ok,
-    cooldown_fail, cooldown_fail_max,
-    bearer_reconnect_enabled and "on" or "off", bearer_iface,
-    alert_after_failed, alert_detach_secs,
-    tg_enabled() and "on" or "off")
+
+-- Seconds since boot, from /proc/uptime.
+local function uptime_seconds()
+    local f = io.open("/proc/uptime", "r")
+    if not f then return math.huge end
+    local line = f:read("*l") or ""
+    f:close()
+    return tonumber(line:match("^(%S+)")) or math.huge
+end
+
+-- The reboot stamp has to outlive the reboot it records, so it cannot
+-- live under /var/run like the rest of our state — that's tmpfs. /etc is
+-- the overlay and survives both reboot and sysupgrade.
+local REBOOT_STAMP = "/etc/5g-watchdog.last-reboot"
+
+local function last_auto_reboot_ts()
+    local f = io.open(REBOOT_STAMP, "r")
+    if not f then return 0 end
+    local v = tonumber(f:read("*l") or "") or 0
+    f:close()
+    return v
+end
+
+local function record_auto_reboot(ts)
+    local f = io.open(REBOOT_STAMP, "w")
+    if not f then return end
+    f:write(tostring(ts), "\n")
+    f:close()
+end
+
+-- Reboot the router, but only when every guard agrees. Returns true if
+-- the reboot was issued.
+--
+-- Rationale for the guards: a modem that comes up mute would otherwise
+-- have us reboot, come up mute again, reboot again — forever. The boot
+-- grace means we never act on a modem that hasn't had time to finish
+-- initialising (empirically the RM520N's AT server needs >2min after a
+-- cold boot before it answers), and the min-interval means at worst we
+-- burn one reboot a day on a genuinely dead modem.
+local function reboot_for_mute_at(mute_secs)
+    local up = uptime_seconds()
+    if up < reboot_boot_grace then
+        log("AT mute %ds but only %ds since boot (grace=%ds) — not rebooting",
+            mute_secs, math.floor(up), reboot_boot_grace)
+        return false
+    end
+
+    local now = os.time()
+    local last = last_auto_reboot_ts()
+    if last > 0 and (now - last) < reboot_min_interval then
+        log("AT mute %ds and data down, but last auto-reboot was %ds ago (min interval %ds) — not rebooting",
+            mute_secs, now - last, reboot_min_interval)
+        return false
+    end
+
+    log("AT mute for %ds AND data plane down — rebooting as last resort", mute_secs)
+    notify_telegram(string.format(
+        "🔻 %s modem AT port mute for %dm and %s is down — rebooting",
+        HOSTNAME, math.floor(mute_secs / 60), bearer_iface))
+    record_auto_reboot(now)
+    -- Give the backgrounded Telegram POST a moment to leave the box;
+    -- once `reboot` runs, curl dies with it.
+    utils.sleep(5)
+    run("reboot")
+    return true
+end
+
+-- ---------------------------------------------------------------------
+-- runtime state
+-- ---------------------------------------------------------------------
+--
+-- Declared before the startup probe below, which already needs to seed
+-- probe_failing_since / last_probe_err when the modem is mute from the
+-- start. Assigning those before their `local` would silently create
+-- globals that the later declarations then shadow back to zero.
 
 local consecutive_degraded = 0
 local cooldown_until = 0
 local last_action_ts = 0
 local last_recovery_seconds = 0
-local actions_total_mode_toggle = 0
 local actions_total_bearer_reconnect = 0
 local consecutive_failed_actions = 0
 -- nr_detached_since: unix-ts when the current detach started (0 = NR
@@ -451,26 +479,136 @@ local nr_detached_since = 0
 -- minute. Both reset on recovery.
 local alerted_failed = false
 local alerted_detach_long = false
+-- AT-probe health. probe_failing_since is the unix-ts of the first
+-- failure in the current run of failures (0 = probe is healthy).
+local probe_failing_since = 0
+local last_good_probe_ts = 0
+local alerted_probe_fail = false
+-- Last known good carrier view. On probe failure we republish THIS
+-- rather than zeroes, so downstream can tell "modem says no NR" from
+-- "we cannot ask the modem".
+local last_good = nil
 
+local last_probe = nil
+local last_probe_err = nil
+local last_probe_err_logged = 0
+local first_pass = true
+
+-- Restore from /var/run/5g-watchdog.state if it's recent enough.
+-- Without this, a procd respawn mid-incident loses cooldown +
+-- consecutive_failed_actions and the next cycle re-fires at zero
+-- backoff against a wedged radio.
+do
+    local prev = read_state()
+    local now = os.time()
+    local prev_ts = prev and tonumber(prev.updated_ts) or 0
+    if prev and prev_ts > 0 and (now - prev_ts) <= STATE_TTL then
+        cooldown_until         = tonumber(prev.cooldown_until) or 0
+        last_action_ts         = tonumber(prev.last_action_ts) or 0
+        last_recovery_seconds  = tonumber(prev.last_recovery_seconds) or 0
+        actions_total_bearer_reconnect = tonumber(prev.actions_total_bearer_reconnect) or 0
+        consecutive_failed_actions     = tonumber(prev.consecutive_failed_actions) or 0
+        nr_detached_since      = tonumber(prev.nr_detached_since) or 0
+        probe_failing_since    = tonumber(prev.probe_failing_since) or 0
+        last_good_probe_ts     = tonumber(prev.last_good_probe_ts) or 0
+        alerted_probe_fail     = (prev.alerted_probe_fail == "1")
+        alerted_failed         = (prev.alerted_failed == "1")
+        alerted_detach_long    = (prev.alerted_detach_long == "1")
+        -- Carry the last known carrier view across the restart too.
+        -- last_good is what emit_state republishes while the probe is
+        -- failing; without restoring it, a respawn during a mute-AT
+        -- incident would go back to publishing zeroes — i.e. straight
+        -- back to reporting "NR detached" for a modem we simply cannot
+        -- reach. procd respawns us, so this is not a rare path.
+        if last_good_probe_ts > 0 then
+            last_good = {
+                nr_attached  = (prev.nr_attached == "1"),
+                nr_carriers  = tonumber(prev.nr_carriers) or 0,
+                lte_carriers = tonumber(prev.lte_carriers) or 0,
+                nr_capable   = (prev.nr_capable == "1"),
+                connected    = (prev.connected == "1"),
+                state        = prev.modem_state or "unknown",
+                mode_pref    = prev.mode_pref or "",
+            }
+        end
+        log("restored state from %ds ago: cooldown_until=%d failed_actions=%d nr_detached_since=%d probe_failing_since=%d alerted_failed=%s alerted_detach_long=%s",
+            now - prev_ts, cooldown_until, consecutive_failed_actions,
+            nr_detached_since, probe_failing_since,
+            tostring(alerted_failed), tostring(alerted_detach_long))
+    elseif prev and prev_ts > 0 then
+        log("ignoring stale state file (%ds old, ttl=%ds)", now - prev_ts, STATE_TTL)
+    end
+end
+
+log("starting up: probing modem over AT (%s)", AT_DEVICE)
+
+-- Sanity check: can we reach the modem at all? Retry once after 30s to
+-- ride out the common transient — the lock being held by a 5g-info /
+-- 5g-monitor run across our startup window, or the modem still coming
+-- up after a cold boot.
+--
+-- If it's still unreachable we enter the main loop anyway, with the
+-- probe-failure clock already running. We deliberately do NOT exit here:
+-- procd would respawn us into the same failure forever, and each respawn
+-- would reset the clock, so the AT-mute alert and the last-resort reboot
+-- below could never fire. A watchdog that dies quietly when its sensor
+-- dies is exactly how 2026-08-12 went unnoticed for 20 days.
+local first_p, first_err = probe()
+if not first_p then
+    log("modem unreachable over AT (%s); sleeping 30s and retrying",
+        first_err or "?")
+    utils.sleep(30)
+    first_p, first_err = probe()
+    if not first_p then
+        log("modem still unreachable (%s); continuing with probe-failure tracking active",
+            first_err or "?")
+        probe_failing_since = os.time()
+        last_probe_err = first_err
+        last_probe_err_logged = os.time()
+    end
+end
+log("started: poll=%ds hysteresis=%d recovery_wait=%ds cooldown_ok=%ds cooldown_fail=%ds (max %ds) iface=%s alert_after_failed=%d alert_detach=%ds alert_probe_fail=%ds at_mute_reboot=%ds telegram=%s",
+    poll_interval, degraded_samples, RECOVERY_MAX_WAIT, cooldown_ok,
+    cooldown_fail, cooldown_fail_max, bearer_iface,
+    alert_after_failed, alert_detach_secs, alert_probe_fail_secs,
+    at_mute_reboot_secs,
+    tg_enabled() and "on" or "off")
+
+
+-- Publish state. `p` is the current probe result, or nil when the probe
+-- failed.
+--
+-- The nil case is the important one. Writing zeroes for nr_attached /
+-- nr_carriers / connected when we simply could not reach the modem is a
+-- lie that outlives the incident: it renders on the dashboard as a
+-- confident "NR has been down for 20 days" (2026-08-12), which is both
+-- wrong and indistinguishable from a real outage. Instead we freeze the
+-- last good carrier figures and flip probe_ok to 0 — the staleness is
+-- then explicit, and `quectel_watchdog_probe_ok` /
+-- `last_good_probe_timestamp_seconds` are what alerts should key on.
 local function emit_state(p)
+    local view = p or last_good
     local s = {
-        nr_attached            = (p and p.nr_attached) and 1 or 0,
-        nr_carriers            = p and p.nr_carriers or 0,
-        lte_carriers           = p and p.lte_carriers or 0,
-        nr_capable             = (p and p.nr_capable) and 1 or 0,
-        connected              = (p and p.connected) and 1 or 0,
-        modem_state            = p and p.state or "unknown",
-        mode_pref              = p and p.mode_pref or "",
+        nr_attached            = (view and view.nr_attached) and 1 or 0,
+        nr_carriers            = view and view.nr_carriers or 0,
+        lte_carriers           = view and view.lte_carriers or 0,
+        nr_capable             = (view and view.nr_capable) and 1 or 0,
+        connected              = (view and view.connected) and 1 or 0,
+        modem_state            = view and view.state or "unknown",
+        mode_pref              = view and view.mode_pref or "",
+        probe_ok               = p and 1 or 0,
+        probe_failing_since    = probe_failing_since,
+        last_good_probe_ts     = last_good_probe_ts,
         consecutive_degraded   = consecutive_degraded,
         cooldown_until         = cooldown_until,
         last_action_ts         = last_action_ts,
         last_recovery_seconds  = last_recovery_seconds,
-        actions_total_mode_toggle      = actions_total_mode_toggle,
         actions_total_bearer_reconnect = actions_total_bearer_reconnect,
         consecutive_failed_actions     = consecutive_failed_actions,
         nr_detached_since      = nr_detached_since,
         alerted_failed         = alerted_failed and 1 or 0,
         alerted_detach_long    = alerted_detach_long and 1 or 0,
+        alerted_probe_fail     = alerted_probe_fail and 1 or 0,
         updated_ts             = os.time(),
     }
     write_state(s)
@@ -514,70 +652,31 @@ local function on_recovery(reason)
     alerted_detach_long = false
 end
 
--- One recovery cycle: try stage 1 (mode_toggle); if NR doesn't come
--- back, escalate to stage 2 (bearer_reconnect) if enabled. The cycle
--- counts as a success if either stage gets NR back, and as a failure
--- only when both are exhausted.
+-- One recovery cycle: bearer_reconnect, then wait to see if NR comes
+-- back. Success resets the failure counter; failure backs off.
 local function take_action()
     local now = os.time()
     if now < cooldown_until then return end
 
-    -- The MM modem index can change at runtime (USB reset / udev
-    -- re-enum / firmware reboot), so we rediscover just-in-time per
-    -- action instead of caching.
-    local mm_idx = discover_modem_index()
-    if not mm_idx then
-        log("no modem visible to ModemManager; skipping action")
-        return
-    end
-
-    -- Stage 1: mode_toggle
-    mode_toggle(mm_idx)
-    actions_total_mode_toggle = actions_total_mode_toggle + 1
+    bearer_reconnect(bearer_iface)
+    actions_total_bearer_reconnect = actions_total_bearer_reconnect + 1
     local recovered_in, post = measure_recovery()
     last_action_ts = os.time()
     last_recovery_seconds = recovered_in
 
     if post and post.nr_attached then
-        log("recovered NR via stage1 mode_toggle in %ds", recovered_in)
+        log("recovered NR via bearer_reconnect in %ds", recovered_in)
         cooldown_until = last_action_ts + cooldown_ok
-        on_recovery(string.format("mode_toggle in %ds", recovered_in))
+        on_recovery(string.format("bearer_reconnect in %ds", recovered_in))
         consecutive_degraded = degraded_samples
         return
     end
 
-    log("stage1 mode_toggle did NOT recover NR within %ds; %s",
-        RECOVERY_MAX_WAIT,
-        bearer_reconnect_enabled
-            and "escalating to stage2 bearer_reconnect"
-            or "stage2 bearer_reconnect disabled — counting cycle as failed")
-
-    if bearer_reconnect_enabled then
-        -- Stage 2: bearer_reconnect
-        bearer_reconnect(bearer_iface)
-        actions_total_bearer_reconnect = actions_total_bearer_reconnect + 1
-        recovered_in, post = measure_recovery()
-        last_action_ts = os.time()
-        last_recovery_seconds = recovered_in
-
-        if post and post.nr_attached then
-            log("recovered NR via stage2 bearer_reconnect in %ds", recovered_in)
-            cooldown_until = last_action_ts + cooldown_ok
-            on_recovery(string.format("bearer_reconnect in %ds", recovered_in))
-            consecutive_degraded = degraded_samples
-            return
-        end
-        log("stage2 bearer_reconnect did NOT recover NR within %ds",
-            RECOVERY_MAX_WAIT)
-    end
-
-    -- Both stages exhausted (or stage 2 disabled) — count the cycle as
-    -- failed and back off.
     consecutive_failed_actions = consecutive_failed_actions + 1
     local backoff = failure_cooldown(consecutive_failed_actions)
     cooldown_until = last_action_ts + backoff
-    log("recovery cycle FAILED (mode_toggle + bearer_reconnect) — consecutive failures=%d, next attempt in %ds",
-        consecutive_failed_actions, backoff)
+    log("bearer_reconnect did NOT recover NR within %ds — consecutive failures=%d, next attempt in %ds",
+        RECOVERY_MAX_WAIT, consecutive_failed_actions, backoff)
     if alert_after_failed > 0
             and not alerted_failed
             and consecutive_failed_actions >= alert_after_failed then
@@ -593,35 +692,7 @@ end
 -- Transition-aware logging: keep the previous probe so we log only when
 -- something actually changed (modem state flipped, NR came/went, user
 -- pinned LTE, etc.) instead of spamming a line per 60s tick.
-local last_probe = nil
-local last_probe_err = nil
-local first_pass = true
 
--- Restore from /var/run/5g-watchdog.state if it's recent enough.
--- Without this, a procd respawn mid-incident loses cooldown +
--- consecutive_failed_actions and the next cycle re-fires at zero
--- backoff against a wedged radio.
-do
-    local prev = read_state()
-    local now = os.time()
-    local prev_ts = prev and tonumber(prev.updated_ts) or 0
-    if prev and prev_ts > 0 and (now - prev_ts) <= STATE_TTL then
-        cooldown_until         = tonumber(prev.cooldown_until) or 0
-        last_action_ts         = tonumber(prev.last_action_ts) or 0
-        last_recovery_seconds  = tonumber(prev.last_recovery_seconds) or 0
-        actions_total_mode_toggle      = tonumber(prev.actions_total_mode_toggle) or 0
-        actions_total_bearer_reconnect = tonumber(prev.actions_total_bearer_reconnect) or 0
-        consecutive_failed_actions     = tonumber(prev.consecutive_failed_actions) or 0
-        nr_detached_since      = tonumber(prev.nr_detached_since) or 0
-        alerted_failed         = (prev.alerted_failed == "1")
-        alerted_detach_long    = (prev.alerted_detach_long == "1")
-        log("restored state from %ds ago: cooldown_until=%d failed_actions=%d nr_detached_since=%d alerted_failed=%s alerted_detach_long=%s",
-            now - prev_ts, cooldown_until, consecutive_failed_actions,
-            nr_detached_since, tostring(alerted_failed), tostring(alerted_detach_long))
-    elseif prev and prev_ts > 0 then
-        log("ignoring stale state file (%ds old, ttl=%ds)", now - prev_ts, STATE_TTL)
-    end
-end
 
 -- If we restart while NR is already detached we never see the
 -- attached→detached transition, so nr_detached_since stays 0 and the
@@ -651,12 +722,65 @@ end
 while true do
     local p, err = probe()
     if not p then
+        local now = os.time()
+        if probe_failing_since == 0 then
+            probe_failing_since = now
+        end
+        local mute_secs = now - probe_failing_since
+
+        -- Log the first failure, then once a minute-ish while it lasts.
+        -- The old code deduped on the error string alone, so a permanent
+        -- failure logged exactly one line and then went quiet forever —
+        -- which reads like the problem went away.
         if last_probe_err ~= err then
             log("probe error: %s", err or "?")
             last_probe_err = err
+            last_probe_err_logged = now
+        elseif now - (last_probe_err_logged or 0) >= 600 then
+            log("probe still failing after %ds: %s", mute_secs, err or "?")
+            last_probe_err_logged = now
         end
+
+        -- Alert on a sustained probe outage. This is the alarm whose
+        -- absence let a mute AT port go unnoticed for 20 days.
+        if alert_probe_fail_secs > 0
+                and not alerted_probe_fail
+                and mute_secs >= alert_probe_fail_secs then
+            notify_telegram(string.format(
+                "🔻 %s cannot read the modem over AT for %dm (%s) — telemetry is stale, data plane %s",
+                HOSTNAME, math.floor(mute_secs / 60), err or "?",
+                data_plane_down() and "is DOWN" or "still up"))
+            alerted_probe_fail = true
+        end
+
+        -- Last resort. Deliberately requires the data plane to be down
+        -- too: a mute AT port with a working bearer costs us telemetry,
+        -- not connectivity, and that is not worth dropping everyone's
+        -- link for. The alert above is what covers that case.
+        if at_mute_reboot_secs > 0
+                and mute_secs >= at_mute_reboot_secs
+                and data_plane_down() then
+            emit_state(nil)
+            if reboot_for_mute_at(mute_secs) then
+                os.exit(0)
+            end
+        end
+
         emit_state(nil)
     else
+        if probe_failing_since > 0 then
+            local down_for = os.time() - probe_failing_since
+            log("probe recovered after %ds", down_for)
+            if alerted_probe_fail then
+                notify_telegram(string.format(
+                    "✅ %s modem readable over AT again (was mute %dm)",
+                    HOSTNAME, math.floor(down_for / 60)))
+            end
+            probe_failing_since = 0
+            alerted_probe_fail = false
+        end
+        last_good = p
+        last_good_probe_ts = os.time()
         last_probe_err = nil
         if first_pass then
             log("initial probe: %s", probe_summary(p))

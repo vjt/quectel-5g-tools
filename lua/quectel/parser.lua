@@ -164,9 +164,43 @@ local function parse_nr5g_fields(values, o)
     }
 end
 
+-- Parse NR5G-SA fields from values array starting at offset o
+-- o is the index of the duplex (FDD/TDD) field.
+--
+-- Standalone NR has no LTE anchor: the serving cell *is* the NR cell, and
+-- the line carries a full cell identity (cell_id/TAC) plus the signal
+-- triplet, in a different order from the NSA variant above. Confirmed
+-- against an RM520N on T-Mobile US (310/260):
+--
+--   +QENG: "servingcell","NOCONN","NR5G-SA","FDD",310,260,1C5EC3016,484,
+--          2F8D00,396250,25,3,-108,-10,15,0,-
+--
+-- The arfcn (396250) and band (25) cross-check against the same modem's
+-- AT+QNWINFO ("NR5G BAND 25", 396250) and AT+QCAINFO PCC line, which
+-- pins the field offsets: the tail is <RSRP>,<RSRQ>,<SINR>, not the
+-- <RSRP>,<SINR>,<RSRQ> order NSA uses.
+local function parse_nr5g_sa_fields(values, o)
+    return {
+        duplex = values[o],
+        mcc = tonumber(values[o + 1]),
+        mnc = tonumber(values[o + 2]),
+        cell_id = values[o + 3],
+        pci = tonumber(values[o + 4]),
+        tac = values[o + 5],
+        arfcn = tonumber(values[o + 6]),
+        band = tonumber(values[o + 7]),
+        bandwidth = tonumber(values[o + 8]),
+        rsrp = tonumber(values[o + 9]),
+        rsrq = tonumber(values[o + 10]),
+        sinr = tonumber(values[o + 11]),
+        scs = tonumber(values[o + 12]),
+    }
+end
+
 function M.parse_serving_cell(text)
     local result = {
         state = nil,
+        mode = nil,
         lte = nil,
         nr5g = nil
     }
@@ -181,14 +215,23 @@ function M.parse_serving_cell(text)
             if values[3] == "LTE" then
                 result.lte = parse_lte_fields(values, 4)
             elseif values[3] == "NR5G-NSA" then
+                result.mode = "NSA"
                 result.nr5g = parse_nr5g_fields(values, 4)
+            elseif values[3] == "NR5G-SA" then
+                result.mode = "SA"
+                result.nr5g = parse_nr5g_sa_fields(values, 4)
             end
 
         elseif cell_type == "LTE" then
             result.lte = parse_lte_fields(values, 2)
 
         elseif cell_type == "NR5G-NSA" then
+            result.mode = "NSA"
             result.nr5g = parse_nr5g_fields(values, 2)
+
+        elseif cell_type == "NR5G-SA" then
+            result.mode = "SA"
+            result.nr5g = parse_nr5g_sa_fields(values, 2)
         end
     end
 
@@ -201,8 +244,9 @@ end
 --
 -- Formats from Quectel RM520N-GL documentation:
 --
--- PCC (10 fields):
---   +QCAINFO: "PCC",<earfcn>,<bandwidth>,<band>,<state>,<pcid>,<rsrp>,<rsrq>,<rssi>,<rssnr>
+-- PCC formats vary by RAT:
+--   10 fields (LTE):  "PCC",<earfcn>,<bandwidth>,<band>,<state>,<pcid>,<rsrp>,<rsrq>,<rssi>,<rssnr>
+--   5 fields (NR5G):  "PCC",<arfcn>,<bw_idx>,<band>,<pcid>   -- standalone (SA)
 --
 -- SCC formats vary by field count:
 --   5 fields (NR5G):  "SCC",<arfcn>,<bw_idx>,<band>,<pcid>
@@ -248,14 +292,21 @@ function M.parse_qcainfo(text)
             }
 
             if role == "PCC" then
-                -- PCC always has 10 fields: role,earfcn,bw,band,state,pci,rsrp,rsrq,rssi,rssnr
                 if num_fields >= 10 then
+                    -- LTE PCC: role,earfcn,bw,band,state,pci,rsrp,rsrq,rssi,rssnr
                     carrier.state = parse_int(values[5])
                     carrier.pci = parse_int(values[6])
                     carrier.rsrp = parse_int(values[7])
                     carrier.rsrq = parse_int(values[8])
                     carrier.rssi = parse_int(values[9])
                     carrier.rssnr = parse_int(values[10])
+                elseif num_fields == 5 then
+                    -- NR5G PCC (standalone): role,arfcn,bw_idx,band,pci.
+                    -- Same short shape as an NR5G SCC — in SA the primary
+                    -- carrier is NR, so there is no LTE anchor line here
+                    -- and no signal fields. RSRP/RSRQ/SINR arrive via
+                    -- backfill from QENG="servingcell" instead.
+                    carrier.pci = parse_int(values[5])
                 end
                 result.pcc = carrier
             else

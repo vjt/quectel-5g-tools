@@ -3,6 +3,14 @@ config modem 'modem'
 	option baudrate '115200'
 	option timeout '2.0'
 	option refresh_interval '5.0'
+	# how long a read-only AT reply may be shared between the tools
+	# (collector, led-bars, ad-hoc CLI) before it is re-read from the
+	# modem. Collapses their overlapping poll timers onto one AT
+	# round-trip so they stop racing for the serial lock. 0 = never
+	# share. The watchdog always reads fresh regardless.
+	option cache_ttl '5'
+	# max wait for /var/lock/quectel-modem.lock before giving up
+	option lock_wait_ms '2000'
 	option beep_interval '0.6'
 	option beeps_enabled '1'
 	list lte_bands '1'
@@ -22,27 +30,41 @@ config watchdog 'watchdog'
 	option enabled '1'
 	option poll_interval '60'
 	option degraded_samples '5'
-	# how long to wait after the mode toggle for NR to reattach before
+	# how long to wait after a recovery action for NR to reattach before
 	# calling it a failure. 60s is too tight in marginal cells (NR
 	# sometimes returns at 90–150s).
 	option recovery_wait_seconds '180'
 	# cooldown after a successful recovery — give the cell a chance to
 	# settle before we test it again
 	option cooldown_ok '300'
-	# cooldown after a failed CYCLE (both stages exhausted); doubles
-	# each consecutive failure up to cooldown_fail_max (30min). Resets
-	# on next success / cell-driven recovery.
+	# cooldown after a failed cycle; doubles each consecutive failure up
+	# to cooldown_fail_max (30min). Resets on next success / cell-driven
+	# recovery.
 	option cooldown_fail '300'
 	option cooldown_fail_max '1800'
-	# Stage 2: bearer reconnect (ifdown/ifup the wwan iface) — covers
-	# the case where stage 1 mode_toggle leaves the bearer's "no SCG"
-	# cache stuck. Set to 0 to fall back to mode_toggle-only.
-	option bearer_reconnect_enabled '1'
+	# interface the bearer lives on — recovery is ifdown/ifup on this
 	option bearer_iface 'wwan'
-	# Telegram alerts (opt-in: leave token/chat empty to disable). Two
-	# independent triggers, both off by default (set the seconds/count
-	# to a non-zero value to enable).
+	# Telegram alerts (opt-in: leave token/chat empty to disable). Each
+	# trigger is independently disabled by setting it to 0.
 	option alert_after_failed '0'
 	option alert_detach_seconds '0'
+	# alert when the modem stops answering AT for this long. Unlike the
+	# two above this is on by default: a mute AT port is invisible from
+	# the outside — the data plane keeps working — and went unnoticed
+	# for 20 days on 2026-08-12 because nothing watched for it.
+	option alert_probe_fail_seconds '900'
 	option telegram_token ''
 	option telegram_chat ''
+	# Last resort for a mute AT port: reboot, but ONLY if the data plane
+	# is down too. A mute port with a working bearer costs telemetry, not
+	# connectivity, and is not worth dropping every client for — the
+	# alert above covers that case. A host reboot is the only thing known
+	# to clear this (USB re-enumeration and a 5G_reset GPIO pulse were
+	# both tried on 2026-09-02 and failed; the GPIO pulse additionally
+	# wedged PCIe). 0 disables.
+	option at_mute_reboot_seconds '1800'
+	# never auto-reboot more than once per this window, nor within
+	# boot_grace of coming up — together these stop a modem that is mute
+	# from boot from turning the router into a reboot loop.
+	option reboot_min_interval_seconds '86400'
+	option reboot_boot_grace_seconds '900'
