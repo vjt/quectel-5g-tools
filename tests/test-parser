@@ -299,6 +299,23 @@ test("no arfcn, different pci -> NO match",
 test("nothing comparable -> NO match", not utils.same_cell({}, {}))
 print("")
 
+print("Test 18: clock_step detects an NTP step, ignores slew")
+-- Both clocks advance together normally, so the difference between how
+-- much each moved is the step. jeeves has no RTC and gets stepped by
+-- sysntpd after every boot; left undetected that inflates every duration
+-- derived from os.time().
+test("no previous sample -> 0", utils.clock_step(nil, nil, 1000, 500) == 0)
+test("clocks in step -> 0", utils.clock_step(1000, 500, 1060, 560) == 0)
+test("1s slew ignored", utils.clock_step(1000, 500, 1061, 560) == 0)
+test("9s below threshold ignored", utils.clock_step(1000, 500, 1069, 560) == 0)
+-- The real case: 60s of monotonic time elapsed, wall clock advanced
+-- 60 + 1643 because NTP stepped it forward mid-sleep.
+test("forward step reported", utils.clock_step(1000, 500, 1000 + 60 + 1643, 560) == 1643)
+test("backward step reported", utils.clock_step(1000, 500, 1000 + 60 - 900, 560) == -900)
+test("fractional monotonic rounded",
+     utils.clock_step(1000, 500.4, 1000 + 60 + 1643, 560.4) == 1643)
+print("")
+
 print("=== Results ===")
 print(string.format("Passed: %d, Failed: %d", passed, failed))
 

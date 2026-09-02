@@ -21,6 +21,35 @@ function M.now()
     end
 end
 
+-- A wall-clock jump smaller than this is ordinary NTP slew and is
+-- ignored; anything larger is treated as a step. Has to sit above the
+-- jitter of a normal poll cycle and well below the smallest interval we
+-- make decisions on.
+M.CLOCK_STEP_MIN = 10
+
+--- Detect a wall-clock step by comparing it against the monotonic clock.
+-- @param prev_wall os.time() at the previous sample
+-- @param prev_mono M.now() at the previous sample
+-- @param wall os.time() now
+-- @param mono M.now() now
+-- @return seconds the wall clock jumped (signed), or 0 if it only slewed
+--
+-- Both clocks advance together in normal operation, so any difference
+-- between how much each moved is the step. Hosts without an RTC — jeeves
+-- included — boot with a stale clock and get stepped by sysntpd once the
+-- network is up, which silently inflates every duration derived from
+-- os.time(). Callers use the returned delta to shift their stored
+-- wall-clock bases so durations stay true *and* the timestamps they
+-- publish still name the corrected instant.
+function M.clock_step(prev_wall, prev_mono, wall, mono)
+    if not prev_wall or not prev_mono then return 0 end
+    local drift = (wall - prev_wall) - (mono - prev_mono)
+    if math.abs(drift) < M.CLOCK_STEP_MIN then return 0 end
+    -- Round toward zero-ish: os.time() is whole seconds, M.now() is
+    -- fractional, so a sub-second remainder here is measurement noise.
+    return drift >= 0 and math.floor(drift + 0.5) or -math.floor(-drift + 0.5)
+end
+
 --- Sleep for specified seconds using nanosleep
 -- Falls back to os.execute if posix.time unavailable
 -- @param seconds Number of seconds to sleep (can be fractional)

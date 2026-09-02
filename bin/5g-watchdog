@@ -203,13 +203,16 @@ end
 -- timeout, false otherwise. Used by bearer_reconnect to wait for the
 -- iface to actually go down before bringing it back up, instead of a
 -- blind sleep that may race with proto-handler teardown.
+-- Timed on the monotonic clock: this is a pure duration that is never
+-- published, and an NTP step mid-wait would otherwise either abort it
+-- instantly or hang it well past the timeout.
 local function wait_iface_up(iface, want, timeout)
     local poll = 1
-    local t0 = os.time()
-    while os.time() - t0 < timeout do
+    local t0 = utils.now()
+    while utils.now() - t0 < timeout do
         local data = run_json(string.format("ifstatus %s", iface))
         if data and data.up == want and data.pending == false then
-            return true, os.time() - t0
+            return true, math.floor(utils.now() - t0)
         end
         utils.sleep(poll)
     end
@@ -494,6 +497,35 @@ local last_probe_err = nil
 local last_probe_err_logged = 0
 local first_pass = true
 
+-- Wall/monotonic pair sampled once per loop, used to spot an NTP step.
+local prev_wall, prev_mono = nil, nil
+
+-- Every instant we keep is a wall-clock timestamp, because they are all
+-- published to the state file and have to be plottable in Grafana. That
+-- makes them vulnerable to the clock being stepped: jeeves has no RTC,
+-- so it boots with a stale clock and sysntpd corrects it once the
+-- network is up. Left alone, a step inflates every duration derived
+-- from those bases — enough, after the 2026-09-02 r7 flash, to make a
+-- ~2 min AT-mute window look like a 27 min outage.
+--
+-- Shifting the bases by the same delta the clock moved keeps durations
+-- true AND leaves each timestamp naming the corrected instant, which is
+-- what a graph wants. Anything still 0 means "unset" and stays 0.
+local function adjust_for_clock_step(drift)
+    if drift == 0 then return end
+    local function shift(v)
+        if not v or v == 0 then return v end
+        return v + drift
+    end
+    probe_failing_since   = shift(probe_failing_since)
+    last_probe_err_logged = shift(last_probe_err_logged)
+    last_good_probe_ts    = shift(last_good_probe_ts)
+    nr_detached_since     = shift(nr_detached_since)
+    cooldown_until        = shift(cooldown_until)
+    last_action_ts        = shift(last_action_ts)
+    log("wall clock stepped %+ds (no RTC + ntp); shifted timers to match", drift)
+end
+
 -- Restore from /var/run/5g-watchdog.state if it's recent enough.
 -- Without this, a procd respawn mid-incident loses cooldown +
 -- consecutive_failed_actions and the next cycle re-fires at zero
@@ -617,13 +649,16 @@ end
 -- After an action, poll every RECOVERY_POLL_INTERVAL up to RECOVERY_MAX_WAIT
 -- to record how long it took NR to come back. Returns seconds to recovery
 -- (or RECOVERY_MAX_WAIT+1 if it never came back within the window).
+-- Monotonic for the same reason as wait_iface_up: the returned figure is
+-- a measured duration, and a clock step during the wait would corrupt
+-- both the verdict and last_recovery_seconds.
 local function measure_recovery()
-    local t0 = os.time()
-    while os.time() - t0 < RECOVERY_MAX_WAIT do
+    local t0 = utils.now()
+    while utils.now() - t0 < RECOVERY_MAX_WAIT do
         utils.sleep(RECOVERY_POLL_INTERVAL)
         local p = probe()
         if p and p.nr_attached then
-            return os.time() - t0, p
+            return math.floor(utils.now() - t0), p
         end
     end
     return RECOVERY_MAX_WAIT + 1, probe()
@@ -719,7 +754,22 @@ local function probe_summary(p)
         p.mode_pref or "")
 end
 
+-- Seed the clock pair here rather than on the first iteration, so a step
+-- landing during the startup probe (which can sit through a 30s retry
+-- while the modem's AT server is still coming up after a boot — exactly
+-- when sysntpd corrects the clock) is caught by the first comparison
+-- instead of being silently absorbed.
+prev_wall, prev_mono = os.time(), utils.now()
+
 while true do
+    -- Sample both clocks before anything else this iteration, so every
+    -- duration computed below is measured against corrected bases.
+    do
+        local wall, mono = os.time(), utils.now()
+        adjust_for_clock_step(utils.clock_step(prev_wall, prev_mono, wall, mono))
+        prev_wall, prev_mono = wall, mono
+    end
+
     local p, err = probe()
     if not p then
         local now = os.time()
@@ -728,10 +778,10 @@ while true do
         end
         local mute_secs = now - probe_failing_since
 
-        -- Log the first failure, then once a minute-ish while it lasts.
-        -- The old code deduped on the error string alone, so a permanent
-        -- failure logged exactly one line and then went quiet forever —
-        -- which reads like the problem went away.
+        -- Log the first failure, then every 10 min for as long as it
+        -- lasts. The old code deduped on the error string alone, so a
+        -- permanent failure logged exactly one line and then went quiet
+        -- forever — which reads like the problem went away.
         if last_probe_err ~= err then
             log("probe error: %s", err or "?")
             last_probe_err = err
