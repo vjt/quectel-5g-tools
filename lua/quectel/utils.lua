@@ -79,16 +79,29 @@ function M.extract_enodeb(cell_id)
 end
 
 --- Check if two cells are the same based on PCI and ARFCN
--- @param a First cell (must have pci and arfcn fields)
--- @param b Second cell (must have pci and arfcn fields)
--- @return true if cells match by PCI or ARFCN
+-- @param a First cell
+-- @param b Second cell
+-- @return true if the two describe the same carrier
+--
+-- ARFCN is the discriminator whenever both sides have one: it names the
+-- carrier frequency, so two entries on different ARFCNs are different
+-- carriers regardless of what else matches. PCI alone is only enough
+-- when one side doesn't report an ARFCN.
+--
+-- This matters for NR carrier aggregation, where the carriers of a
+-- single gNB commonly share a PCI. A real SA sample from
+-- vjt/openwrt-glinet-x3000#1 has band 25 (arfcn 396250) and band 71
+-- (arfcn 125530) both on PCI 484 — under a plain "pci or arfcn" match
+-- the band-71 SCC would inherit the band-25 serving cell's RSRP and we
+-- would publish a measurement that was never taken.
 function M.same_cell(a, b)
     if not a or not b then return false end
 
-    local pci_match = a.pci and b.pci and a.pci == b.pci
-    local arfcn_match = a.arfcn and b.arfcn and a.arfcn == b.arfcn
+    if a.arfcn and b.arfcn then
+        return a.arfcn == b.arfcn
+    end
 
-    return pci_match or arfcn_match
+    return (a.pci and b.pci and a.pci == b.pci) or false
 end
 
 --- Add frequency and bandwidth info to a serving cell structure

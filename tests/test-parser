@@ -278,6 +278,25 @@ utils.backfill_from_serving(sa_status)
 test("PCC rsrp backfilled", sa_status.ca.pcc.rsrp == -108)
 test("PCC rsrq backfilled", sa_status.ca.pcc.rsrq == -10)
 test("PCC sinr backfilled", sa_status.ca.pcc.sinr == 15)
+-- The band-71 SCC shares PCI 484 with the band-25 serving cell but sits
+-- on a different ARFCN, so it is a different carrier and must NOT
+-- inherit the serving cell's signal. Publishing a number we never
+-- measured is worse than publishing nothing.
+test("SCC on other ARFCN not backfilled", sa_status.ca.scc[1].rsrp == nil)
+print("")
+
+print("Test 17: same_cell discriminates on ARFCN when both have one")
+test("same arfcn, same pci -> match",
+     utils.same_cell({ pci = 484, arfcn = 396250 }, { pci = 484, arfcn = 396250 }))
+test("different arfcn, same pci -> NO match",
+     not utils.same_cell({ pci = 484, arfcn = 125530 }, { pci = 484, arfcn = 396250 }))
+test("same arfcn, different pci -> match (arfcn wins)",
+     utils.same_cell({ pci = 1, arfcn = 396250 }, { pci = 484, arfcn = 396250 }))
+test("no arfcn on one side -> fall back to pci",
+     utils.same_cell({ pci = 484 }, { pci = 484, arfcn = 396250 }))
+test("no arfcn, different pci -> NO match",
+     not utils.same_cell({ pci = 7 }, { pci = 484 }))
+test("nothing comparable -> NO match", not utils.same_cell({}, {}))
 print("")
 
 print("=== Results ===")
