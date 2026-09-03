@@ -17,17 +17,28 @@ PKG_NAME:=quectel-5g-tools
 PKG_VERSION:=1.7.1
 PKG_RELEASE:=1
 
-PKG_SOURCE_PROTO:=git
-PKG_SOURCE_URL:=https://github.com/vjt/quectel-5g-tools.git
-PKG_SOURCE_VERSION:=HEAD
-PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
-PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
-
 PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=Marcello Barnaba <mbarnaba@meta.com>
 
+# Build from the checkout this Makefile lives in, not from a tarball.
+#
+# The package dir is symlinked into <sdk>/package/, so the sources sit two
+# levels up ($(CURDIR)/../.. == the repo root). Fetching them from github
+# instead used to break in two ways: anonymous git-over-https is refused
+# from datacenter IPs (GitHub answers 401, so SDK builds on rented build
+# hosts died), and PKG_SOURCE_VERSION:=HEAD could package a different
+# commit than the one the build was triggered for.
+#
+# The glob skips dotfiles on purpose — no .git in the build dir.
+PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
+
 include $(INCLUDE_DIR)/package.mk
+
+define Build/Prepare
+	mkdir -p $(PKG_BUILD_DIR)
+	$(CP) $(CURDIR)/../../* $(PKG_BUILD_DIR)/
+endef
 
 define Package/quectel-5g-tools
   SECTION:=net
