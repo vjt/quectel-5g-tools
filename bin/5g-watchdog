@@ -14,6 +14,22 @@
 -- `ifdown wwan; ifup wwan` recovered NR in seconds on the same n78 cell
 -- that had been "missing" the whole time.
 --
+-- That action is gated on the LTE anchor changing (see
+-- quectel.watchdog_policy). bearer_reconnect rebuilds the bearer; it
+-- cannot make the network hand out a different anchor cell. On
+-- 2026-09-04 the modem reselected from B1 pci 34 — which grants EN-DC
+-- and was carrying n78 pci 920 — onto B3 pci 427, which does not, and
+-- the watchdog spent the day proving a bearer rebuild cannot undo a
+-- cell reselection: 30 bounces, each dropping every connection through
+-- the router and changing its public IP, none of which could have
+-- worked. The gate allows one attempt per anchor. Fail on an anchor and
+-- it is spent until the cell hands back a different one, which is a new
+-- hypothesis and worth another attempt.
+--
+-- The gate suppresses useless actions, never useful ones. LTE-only is a
+-- degraded line, not an acceptable steady state, so NR loss on an
+-- untried anchor still gets its recovery attempt immediately.
+--
 -- There used to be a cheaper stage 1, mode_toggle, which dropped the
 -- radio to 4g via `mmcli --set-allowed-modes` and restored it. It is
 -- gone, and deliberately so: on 2026-08-12 a mode_toggle wedged the
@@ -75,6 +91,7 @@ package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 local quectel_uci = require("quectel.uci")
 local utils = require("quectel.utils")
 local Modem = require("quectel.modem")
+local policy = require("quectel.watchdog_policy")
 local jsonc = require("luci.jsonc")
 
 local AT_DEVICE = quectel_uci.get_string("quectel", "modem", "device", "/dev/ttyUSB2")
@@ -307,6 +324,14 @@ local function probe()
     -- include NR5G.
     local nr_capable = (mode_pref == "AUTO") or (mode_pref:find("NR5G") ~= nil)
 
+    -- Which cell we are camped on, not just how many carriers we have.
+    -- Counts alone cannot distinguish a bearer stuck without its NR
+    -- carrier (which bearer_reconnect fixes) from an LTE anchor that
+    -- does not grant EN-DC (which nothing here can fix). Discarding this
+    -- is what let the watchdog bounce the WAN 30 times on 2026-09-04
+    -- against a cell change it could not have undone.
+    local anchor, anchor_label = policy.anchor_of(sig.ca)
+
     return {
         connected      = has_pcc,
         state          = has_pcc and "connected" or "no-carrier",
@@ -315,6 +340,8 @@ local function probe()
         lte_carriers   = lte_carriers,
         nr_capable     = nr_capable,
         mode_pref      = mode_pref,
+        anchor         = anchor,
+        anchor_label   = anchor_label,
     }
 end
 
@@ -487,11 +514,19 @@ local consecutive_failed_actions = 0
 -- nr_detached_since: unix-ts when the current detach started (0 = NR
 -- attached or never observed detached). Reset to 0 on any recovery.
 local nr_detached_since = 0
+-- The anchor a recovery action last failed on. While the modem stays on
+-- it, another bearer bounce cannot help — the anchor is what is wrong —
+-- so we hold off and wait for the cell to hand back a different one.
+-- Cleared on recovery and whenever the anchor changes on its own.
+local failed_anchor = nil
 -- alerted_*: per-incident "did we already send this alert" flag, so a
 -- long detach doesn't keep firing the same Telegram message every
 -- minute. Both reset on recovery.
 local alerted_failed = false
 local alerted_detach_long = false
+-- Set once per stint on a spent anchor, so the "not acting" explanation
+-- is logged and alerted once instead of every poll.
+local alerted_anchor_stuck = false
 -- AT-probe health. probe_failing_since is the unix-ts of the first
 -- failure in the current run of failures (0 = probe is healthy).
 local probe_failing_since = 0
@@ -571,7 +606,16 @@ do
                 connected    = (prev.connected == "1"),
                 state        = prev.modem_state or "unknown",
                 mode_pref    = prev.mode_pref or "",
+                anchor       = (prev.anchor ~= "" and prev.anchor) or nil,
+                anchor_label = (prev.anchor_label ~= "" and prev.anchor_label) or nil,
             }
+        end
+        -- Carry the spent anchor across the restart. procd respawns are
+        -- routine, and forgetting here would re-arm an action we already
+        -- know does not work on this cell — turning every respawn into
+        -- another WAN bounce.
+        if prev.failed_anchor and prev.failed_anchor ~= "" then
+            failed_anchor = prev.failed_anchor
         end
         log("restored state from %ds ago: cooldown_until=%d failed_actions=%d nr_detached_since=%d probe_failing_since=%d alerted_failed=%s alerted_detach_long=%s",
             now - prev_ts, cooldown_until, consecutive_failed_actions,
@@ -651,6 +695,13 @@ local function emit_state(p)
         alerted_failed         = alerted_failed and 1 or 0,
         alerted_detach_long    = alerted_detach_long and 1 or 0,
         alerted_probe_fail     = alerted_probe_fail and 1 or 0,
+        -- Which cell we are camped on, and whether we have already spent
+        -- this anchor's recovery attempt. Reconstructing the anchor by
+        -- hand from per-band RSRP series is what the 2026-09-04
+        -- diagnosis needed; published, it is one query.
+        anchor                 = view and view.anchor or "",
+        anchor_label           = view and view.anchor_label or "",
+        failed_anchor          = failed_anchor or "",
         updated_ts             = os.time(),
     }
     write_state(s)
@@ -695,13 +746,42 @@ local function on_recovery(reason)
     nr_detached_since = 0
     alerted_failed = false
     alerted_detach_long = false
+    -- NR is back, so whatever anchor defeated us is no longer the
+    -- situation we are in. Forget it, or the next detach on that same
+    -- cell would be suppressed on stale grounds.
+    failed_anchor = nil
+    alerted_anchor_stuck = false
 end
 
 -- One recovery cycle: bearer_reconnect, then wait to see if NR comes
 -- back. Success resets the failure counter; failure backs off.
-local function take_action()
+-- @param p the probe this decision is based on
+local function take_action(p)
     local now = os.time()
     if now < cooldown_until then return end
+
+    -- Is this action capable of helping, or would it just drop the WAN?
+    local act, why = policy.should_act({
+        nr_attached   = p.nr_attached,
+        anchor        = p.anchor,
+        failed_anchor = failed_anchor,
+    })
+    if not act then
+        if not alerted_anchor_stuck then
+            log("not acting: %s", why)
+            log("NR is down but this is a cell-side condition a bearer "
+                .. "rebuild cannot fix; holding until the anchor changes")
+            if tg_enabled() then
+                notify_telegram(string.format(
+                    "🔻 %s 5G NR down on anchor %s — no EN-DC on this cell. "
+                    .. "Bearer reconnect cannot fix it; waiting for the "
+                    .. "network to hand back a different anchor.",
+                    HOSTNAME, p.anchor_label or p.anchor or "unknown"))
+            end
+            alerted_anchor_stuck = true
+        end
+        return
+    end
 
     bearer_reconnect(bearer_iface)
     actions_total_bearer_reconnect = actions_total_bearer_reconnect + 1
@@ -718,10 +798,15 @@ local function take_action()
     end
 
     consecutive_failed_actions = consecutive_failed_actions + 1
+    -- This anchor has now had its attempt and it did not work. Spend it,
+    -- so we stop rebuilding the bearer against a cell that will keep
+    -- giving the same answer, and wait for the network to move us.
+    failed_anchor = p.anchor
     local backoff = failure_cooldown(consecutive_failed_actions)
     cooldown_until = last_action_ts + backoff
-    log("bearer_reconnect did NOT recover NR within %ds — consecutive failures=%d, next attempt in %ds",
-        RECOVERY_MAX_WAIT, consecutive_failed_actions, backoff)
+    log("bearer_reconnect did NOT recover NR within %ds on anchor %s — consecutive failures=%d, next attempt in %ds",
+        RECOVERY_MAX_WAIT, p.anchor_label or p.anchor or "unknown",
+        consecutive_failed_actions, backoff)
     if alert_after_failed > 0
             and not alerted_failed
             and consecutive_failed_actions >= alert_after_failed then
@@ -857,6 +942,22 @@ while true do
                         tostring(last_probe.nr_capable), tostring(p.nr_capable),
                         p.mode_pref or "")
                 end
+                if last_probe.anchor ~= p.anchor then
+                    log("LTE anchor: %s -> %s",
+                        last_probe.anchor_label or last_probe.anchor or "none",
+                        p.anchor_label or p.anchor or "none")
+                    -- The network moved us. Whatever we learned about the
+                    -- previous cell says nothing about this one, so a
+                    -- recovery attempt is worth making again.
+                    if failed_anchor and failed_anchor ~= p.anchor then
+                        log("anchor changed — re-arming recovery "
+                            .. "(previous attempt failed on %s)", failed_anchor)
+                        failed_anchor = nil
+                        alerted_anchor_stuck = false
+                        consecutive_failed_actions = 0
+                        cooldown_until = 0
+                    end
+                end
                 if last_probe.nr_attached ~= p.nr_attached then
                     if p.nr_attached then
                         -- Natural recovery (not driven by our action)
@@ -911,7 +1012,7 @@ while true do
                         cooldown_until - now, consecutive_failed_actions)
                 else
                     log("NR SCG dropped past hysteresis (%s) — taking action", probe_summary(p))
-                    take_action()
+                    take_action(p)
                 end
             end
 

@@ -1,0 +1,148 @@
+#!/usr/bin/env lua
+-- Test script for quectel.watchdog_policy
+--
+-- The policy exists because of 2026-09-04. At 04:05 the modem reselected
+-- from an LTE anchor that grants EN-DC (B1 pci 34, carrying n78 pci 920)
+-- to one that does not (B3 pci 427). bearer_reconnect tears down and
+-- rebuilds the PDN bearer; it cannot make the network hand out a
+-- different anchor. So every recovery attempt was a no-op by
+-- construction, and the watchdog ran 30 of them in one day — each an
+-- ifdown/ifup that dropped every connection through the router and
+-- changed its public IP — against a condition none of them could touch.
+--
+-- The gate: an action is worth taking once per anchor. If the anchor has
+-- not changed since the last failed attempt, acting again cannot help
+-- and the WAN is not worth dropping for it. When the cell finally hands
+-- back a different anchor, the hypothesis is new and one action is
+-- re-armed.
+
+package.path = "lua/?.lua;lua/?/init.lua;/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
+
+local policy = require("quectel.watchdog_policy")
+
+local passed = 0
+local failed = 0
+
+local function test(name, condition)
+    if condition then
+        print(string.format("  [OK] %s", name))
+        passed = passed + 1
+    else
+        print(string.format("  [FAIL] %s", name))
+        failed = failed + 1
+    end
+end
+
+print("=== Testing watchdog policy ===")
+print("")
+
+-- -------------------------------------------------------------------
+-- Anchor identity. PCI is only unique per frequency, so the ARFCN has to
+-- be part of the identity or two different cells could compare equal.
+print("Test 1: anchor identity comes from the PCC")
+local good = {
+    pcc = { role = "pcc", rat = "lte", arfcn = 275, band = 1, pci = 34 },
+    scc = {
+        { role = "scc", rat = "lte", arfcn = 1350, band = 3, pci = 47 },
+        { role = "scc", rat = "5g", arfcn = 648768, band = 78, pci = 920 },
+    },
+}
+local id, label = policy.anchor_of(good)
+test("identity built", id == "275:34")
+test("label is readable", label == "B1 p34")
+print("")
+
+print("Test 2: the bad anchor from the incident is a different identity")
+local bad = {
+    pcc = { role = "pcc", rat = "lte", arfcn = 1350, band = 3, pci = 427 },
+    scc = { { role = "scc", rat = "lte", arfcn = 6300, band = 20, pci = 449 } },
+}
+local bad_id, bad_label = policy.anchor_of(bad)
+test("identity built", bad_id == "1350:427")
+test("label is readable", bad_label == "B3 p427")
+test("differs from the good anchor", bad_id ~= id)
+print("")
+
+print("Test 3: same PCI on a different frequency is NOT the same anchor")
+local elsewhere = { pcc = { role = "pcc", rat = "lte", arfcn = 6300, band = 20, pci = 34 } }
+test("distinct identity", policy.anchor_of(elsewhere) ~= id)
+print("")
+
+print("Test 4: no carrier yields no anchor")
+test("nil ca", policy.anchor_of(nil) == nil)
+test("no pcc", policy.anchor_of({ scc = {} }) == nil)
+print("")
+
+-- -------------------------------------------------------------------
+print("Test 5: NR attached means nothing to do")
+local act, reason = policy.should_act({ nr_attached = true, anchor = "1350:427" })
+test("does not act", act == false)
+test("reason given", type(reason) == "string" and #reason > 0)
+print("")
+
+print("Test 6: first failure on an anchor is worth acting on")
+act = policy.should_act({ nr_attached = false, anchor = "1350:427", failed_anchor = nil })
+test("acts", act == true)
+print("")
+
+-- The 30-bounce day: same anchor, already proven unfixable.
+print("Test 7: an anchor that already defeated us is not retried")
+act, reason = policy.should_act({
+    nr_attached = false, anchor = "1350:427", failed_anchor = "1350:427",
+})
+test("does not act", act == false)
+test("reason names the anchor", reason:find("1350:427") ~= nil)
+print("")
+
+print("Test 8: a changed anchor re-arms one action")
+act = policy.should_act({
+    nr_attached = false, anchor = "275:34", failed_anchor = "1350:427",
+})
+test("acts", act == true)
+print("")
+
+print("Test 9: without an anchor we do not act")
+-- No PCC at all is a different failure (no carrier), handled elsewhere;
+-- bouncing the bearer here would be guesswork.
+act = policy.should_act({ nr_attached = false, anchor = nil, failed_anchor = nil })
+test("does not act", act == false)
+print("")
+
+-- -------------------------------------------------------------------
+-- Today's timeline, replayed: the run of failures, the cell-driven
+-- recovery at 10:36 and the re-drop at 11:18 onto the same bad anchor.
+print("Test 10: replaying 2026-09-04 yields one action, not thirty")
+local BAD, GOOD = "1350:427", "275:34"
+local failed_anchor = nil
+local actions = 0
+local timeline = {}
+for _ = 1, 20 do table.insert(timeline, { nr = false, anchor = BAD }) end
+table.insert(timeline, { nr = true, anchor = GOOD })      -- cell-driven recovery
+for _ = 1, 20 do table.insert(timeline, { nr = false, anchor = BAD }) end
+
+for _, sample in ipairs(timeline) do
+    local do_act = policy.should_act({
+        nr_attached = sample.nr,
+        anchor = sample.anchor,
+        failed_anchor = failed_anchor,
+    })
+    if do_act then
+        actions = actions + 1
+        failed_anchor = sample.anchor          -- the attempt fails
+    elseif sample.nr then
+        failed_anchor = nil                    -- recovered: forget the grudge
+    end
+end
+test("acted twice, once per stint on the bad anchor", actions == 2)
+print("")
+
+print("Test 11: a good anchor that loses NR still gets its own attempt")
+-- Regression guard: suppression must key on the anchor, never become a
+-- blanket 'stop acting'.
+failed_anchor = BAD
+act = policy.should_act({ nr_attached = false, anchor = GOOD, failed_anchor = failed_anchor })
+test("acts on the good anchor", act == true)
+print("")
+
+print(string.format("Results: %d passed, %d failed", passed, failed))
+if failed > 0 then os.exit(1) end

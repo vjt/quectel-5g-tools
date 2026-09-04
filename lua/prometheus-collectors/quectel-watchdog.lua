@@ -58,6 +58,16 @@ local function scrape()
     local probe_ok          = metric("quectel_watchdog_probe_ok", "gauge")
     local probe_failing     = metric("quectel_watchdog_probe_failing_since_timestamp_seconds", "gauge")
     local last_good_probe   = metric("quectel_watchdog_last_good_probe_timestamp_seconds", "gauge")
+    -- Which LTE cell the modem is camped on, as an info-style series
+    -- (always 1, carrying the identity in labels). Whether an anchor
+    -- grants EN-DC is a property of the cell, so "when did the anchor
+    -- change" is the question that explains most NR losses — on
+    -- 2026-09-04 it had to be reconstructed by hand from per-band RSRP
+    -- series. anchor_spent marks an anchor whose recovery attempt has
+    -- already been made and failed, i.e. one we are deliberately not
+    -- bouncing the WAN for again.
+    local anchor_info       = metric("quectel_watchdog_anchor_info", "gauge")
+    local anchor_spent      = metric("quectel_watchdog_anchor_spent", "gauge")
 
     nr_attached({}, num("nr_attached"))
     nr_carriers({}, num("nr_carriers"))
@@ -78,6 +88,14 @@ local function scrape()
     probe_ok({}, num("probe_ok"))
     probe_failing({}, num("probe_failing_since"))
     last_good_probe({}, num("last_good_probe_ts"))
+
+    -- Only emitted while there is a serving cell: an absent series is
+    -- honest about "no anchor", where a zero would read as one.
+    local anchor = s["anchor"]
+    if anchor and anchor ~= "" then
+        anchor_info({ anchor = anchor, label = s["anchor_label"] or "" }, 1)
+        anchor_spent({}, (s["failed_anchor"] == anchor) and 1 or 0)
+    end
 end
 
 return { scrape = scrape }
