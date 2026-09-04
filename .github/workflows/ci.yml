@@ -14,7 +14,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y lua5.1 luarocks
-      
+
+      # luaposix is a hard dependency of the package, so CI without it
+      # was not testing the parts that matter most. quectel.lock is one
+      # of them: it requires posix at load, and its suite covers the
+      # lockfile behaviour behind the twenty-day watchdog blackout in
+      # August. Skipping those tests here would also disable the one
+      # that catches luaposix disagreeing with itself between releases —
+      # getpid() answers with a number on the router and a table on
+      # newer builds, which is only observable against the real library.
+      - name: Install luaposix
+        run: sudo apt-get install -y lua-posix
+
       - name: Install luacheck
         run: sudo luarocks install luacheck
       
