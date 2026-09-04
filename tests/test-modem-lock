@@ -1,0 +1,203 @@
+#!/usr/bin/env lua
+-- Test script for the modem lock (quectel.lock)
+--
+-- Covers the defects that produced the 2026-08-13 → 09-01 blind spot, in
+-- which 5g-watchdog logged "Modem is locked by another process" on every
+-- probe for 20 days and only a reboot cleared it:
+--
+--   * a lockfile could be observed empty (create and PID-write were two
+--     separate steps), so a reader saw no owner
+--   * release() removed whatever lockfile was present, including one
+--     owned by a different process
+--   * nothing bounded how long a holder could keep the lock, so a hung
+--     holder — or a dead one whose PID had been recycled to a live
+--     process — blocked every consumer indefinitely
+
+package.path = "lua/?.lua;lua/?/init.lua;/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
+
+local lock = require("quectel.lock")
+
+local passed = 0
+local failed = 0
+
+local function test(name, condition)
+    if condition then
+        print(string.format("  [OK] %s", name))
+        passed = passed + 1
+    else
+        print(string.format("  [FAIL] %s", name))
+        failed = failed + 1
+    end
+end
+
+-- Each test gets a private lockfile so the suite never touches the real
+-- /var/lock entry on a machine that is actually running the daemons.
+local PATH = os.tmpname()
+os.remove(PATH)
+
+-- Injected clock and identity. Defaults are restored before every test so
+-- one test's overrides cannot leak into the next.
+local real_now, real_getpid, real_is_alive = lock.now, lock.getpid, lock.is_alive
+
+local fake_time = 1000
+local function reset()
+    os.remove(PATH)
+    fake_time = 1000
+    lock.now = function() return fake_time end
+    lock.getpid = function() return 4242 end
+    lock.is_alive = function() return true end
+end
+
+print("=== Testing modem lock ===")
+print("")
+
+-- -------------------------------------------------------------------
+print("Test 1: acquire stamps the lockfile with owner and time")
+reset()
+local ok, err = lock.acquire({ path = PATH })
+test("acquire succeeded", ok == true)
+test("no error", err == nil)
+local info = lock.read(PATH)
+test("lockfile readable", info ~= nil)
+test("records our pid", info and info.pid == 4242)
+test("records acquisition time", info and info.acquired_at == 1000)
+print("")
+
+-- -------------------------------------------------------------------
+-- The original bug: open(O_CREAT|O_EXCL) produced an EMPTY file and the
+-- PID was written afterwards. Any reader landing in that window saw no
+-- owner. The lockfile must be complete the instant it is visible.
+print("Test 2: lockfile is never visible without an owner")
+reset()
+lock.acquire({ path = PATH })
+local raw = io.open(PATH, "r")
+local contents = raw and raw:read("*a") or ""
+if raw then raw:close() end
+test("lockfile is not empty", contents ~= "")
+test("contents parse to an owner", lock.read(PATH) ~= nil)
+print("")
+
+-- -------------------------------------------------------------------
+print("Test 3: a live, unexpired holder blocks a second acquirer")
+reset()
+lock.acquire({ path = PATH })
+lock.getpid = function() return 9999 end  -- a different process
+local t0 = os.clock()
+ok, err = lock.acquire({ path = PATH, wait_ms = 200 })
+test("acquire failed", ok == nil)
+test("error mentions the lock", err ~= nil and err:match("locked") ~= nil)
+test("owner unchanged", lock.read(PATH).pid == 4242)
+print("")
+
+-- -------------------------------------------------------------------
+-- The original release() was an unconditional os.remove(): process B
+-- could delete the lockfile process A was holding, after which both
+-- believed they owned the modem.
+print("Test 4: release by a non-owner is refused")
+reset()
+lock.acquire({ path = PATH })
+lock.getpid = function() return 9999 end
+ok, err = lock.release({ path = PATH })
+test("release refused", ok == nil)
+test("error explains why", err ~= nil and err:match("owner") ~= nil)
+test("lockfile still present", lock.read(PATH) ~= nil)
+test("still owned by original pid", lock.read(PATH).pid == 4242)
+print("")
+
+-- -------------------------------------------------------------------
+print("Test 5: release by the owner frees the lock")
+reset()
+lock.acquire({ path = PATH })
+ok = lock.release({ path = PATH })
+test("release succeeded", ok == true)
+test("lockfile gone", lock.read(PATH) == nil)
+lock.getpid = function() return 9999 end
+test("another process can now acquire", lock.acquire({ path = PATH }) == true)
+print("")
+
+-- -------------------------------------------------------------------
+print("Test 6: a lock held by a dead process is stolen")
+reset()
+lock.acquire({ path = PATH })
+lock.getpid = function() return 9999 end
+lock.is_alive = function() return false end   -- previous owner died
+ok = lock.acquire({ path = PATH, wait_ms = 200 })
+test("acquire succeeded", ok == true)
+test("ownership transferred", lock.read(PATH).pid == 9999)
+print("")
+
+-- -------------------------------------------------------------------
+-- The 20-day outage: whether the recorded PID belonged to a hung holder
+-- or had been recycled to an unrelated live process, kill(pid,0) said
+-- "alive" forever and nothing ever reclaimed the lock. A hold-time
+-- ceiling makes that self-healing regardless of which it was.
+print("Test 7: a lock held past max_hold_seconds is stolen even if the owner is alive")
+reset()
+lock.acquire({ path = PATH })
+lock.getpid = function() return 9999 end
+lock.is_alive = function() return true end    -- owner (or a PID reusing it) is alive
+fake_time = 1000 + 16                          -- exceeds the 15s ceiling
+ok = lock.acquire({ path = PATH, wait_ms = 200, max_hold_seconds = 15 })
+test("expired lock was stolen", ok == true)
+test("ownership transferred", lock.read(PATH).pid == 9999)
+print("")
+
+-- -------------------------------------------------------------------
+print("Test 8: a fresh lock held by a live owner is NOT stolen")
+reset()
+lock.acquire({ path = PATH })
+lock.getpid = function() return 9999 end
+lock.is_alive = function() return true end
+fake_time = 1000 + 5                           -- well inside the ceiling
+ok = lock.acquire({ path = PATH, wait_ms = 200, max_hold_seconds = 15 })
+test("acquire refused", ok == nil)
+test("owner unchanged", lock.read(PATH).pid == 4242)
+print("")
+
+-- -------------------------------------------------------------------
+print("Test 9: a corrupt lockfile is reclaimed rather than blocking forever")
+reset()
+local f = io.open(PATH, "w")
+f:write("garbage-not-a-pid\n")
+f:close()
+test("corrupt file reads as no owner", lock.read(PATH) == nil)
+ok = lock.acquire({ path = PATH, wait_ms = 200 })
+test("acquire succeeded", ok == true)
+test("ownership recorded", lock.read(PATH).pid == 4242)
+print("")
+
+-- -------------------------------------------------------------------
+print("Test 10: waiting acquirer succeeds once the holder releases")
+reset()
+lock.acquire({ path = PATH })
+lock.getpid = function() return 9999 end
+test("blocked while held", lock.acquire({ path = PATH, wait_ms = 100 }) == nil)
+lock.getpid = function() return 4242 end
+lock.release({ path = PATH })
+lock.getpid = function() return 9999 end
+test("acquires after release", lock.acquire({ path = PATH, wait_ms = 100 }) == true)
+print("")
+
+-- -------------------------------------------------------------------
+-- The defaults have to work against the real luaposix, whose getpid()
+-- returns a bare number on the router's build and a table of process
+-- ids on newer releases (the one CI installs). Every test above stubs
+-- getpid, so without this the mismatch reaches production untested.
+print("Test 11: the real getpid/clock seams return usable scalars")
+os.remove(PATH)
+lock.now, lock.getpid, lock.is_alive = real_now, real_getpid, real_is_alive
+test("getpid returns a number", type(lock.getpid()) == "number")
+test("now returns a number", type(lock.now()) == "number")
+test("is_alive is true for ourselves", lock.is_alive(lock.getpid()) == true)
+
+ok = lock.acquire({ path = PATH })
+test("acquire works with real seams", ok == true)
+info = lock.read(PATH)
+test("records the real pid", info ~= nil and info.pid == lock.getpid())
+test("release works with real seams", lock.release({ path = PATH }) == true)
+print("")
+
+os.remove(PATH)
+
+print(string.format("Results: %d passed, %d failed", passed, failed))
+if failed > 0 then os.exit(1) end

@@ -8,9 +8,23 @@ config modem 'modem'
 	# modem. Collapses their overlapping poll timers onto one AT
 	# round-trip so they stop racing for the serial lock. 0 = never
 	# share. The watchdog always reads fresh regardless.
-	option cache_ttl '5'
+	#
+	# Must exceed the prometheus scrape interval (10s), or the cache
+	# never hits: at 5s every scrape missed, so every scrape took the
+	# lock. That is the pressure that starved the watchdog.
+	option cache_ttl '15'
 	# max wait for /var/lock/quectel-modem.lock before giving up
 	option lock_wait_ms '2000'
+	# Ceiling on how long any one process may hold the modem lock before
+	# a waiter reclaims it. Nothing else bounds a holder hung on an
+	# unresponsive port — and a dead holder whose PID has been recycled
+	# to a live process looks alive forever to kill(pid,0). That is how
+	# the port stayed locked from 2026-08-13 to 09-01, until the reboot
+	# for the r7 flash wiped tmpfs. Sits well above the slowest
+	# legitimate hold (two AT commands at the 2s timeout) and below every
+	# poll interval. 5g-watchdog deliberately waits longer than this
+	# ceiling, so it can never be starved.
+	option lock_max_hold_seconds '15'
 	option beep_interval '0.6'
 	option beeps_enabled '1'
 	list lte_bands '1'

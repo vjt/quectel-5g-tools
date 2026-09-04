@@ -9,7 +9,11 @@
 -- machine running it, and local edits go untested.
 package.path = "lua/?.lua;lua/?/init.lua;/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 
--- Check for required dependencies
+-- This test drives the real modem, so it needs luaposix *and* an actual
+-- AT device. Checking only for luaposix was misleading: on a developer
+-- box that has the library but no modem it ran anyway and failed with
+-- whatever error the absent /dev/ttyUSB2 happened to produce, which
+-- reads as a broken build rather than a skipped test.
 local ok, _ = pcall(require, "posix")
 if not ok then
     print("=== Testing Prometheus Collector ===")
@@ -17,6 +21,16 @@ if not ok then
     print("SKIPPED: luaposix not available (run on router)")
     os.exit(0)
 end
+
+local probe_device = require("quectel").load_config().device or "/dev/ttyUSB2"
+local probe_handle = io.open(probe_device, "r")
+if not probe_handle then
+    print("=== Testing Prometheus Collector ===")
+    print("")
+    print("SKIPPED: no modem at " .. probe_device .. " (run on router)")
+    os.exit(0)
+end
+probe_handle:close()
 
 print("=== Testing Prometheus Collector ===")
 print("")

@@ -79,13 +79,22 @@ local jsonc = require("luci.jsonc")
 
 local AT_DEVICE = quectel_uci.get_string("quectel", "modem", "device", "/dev/ttyUSB2")
 local AT_TIMEOUT = 5         -- seconds, AT response timeout
+
 -- The 5g-* helpers and the watchdog all share /dev/ttyUSB2 via
--- /var/lock/quectel-modem.lock. The default 2000ms wait works fine in
--- steady state, but at boot or right after a sysupgrade the helpers
--- are simultaneously starting up and lock contention is heaviest.
--- Five seconds is enough headroom for 5g-led-bars (refresh_interval=5s)
--- to finish its current poll and release the lock.
-local AT_LOCK_WAIT_MS = 5000
+-- /var/lock/quectel-modem.lock, and of all of them the watchdog is the
+-- one that must never lose. It spent 2026-08-13 → 09-01 losing: every
+-- probe returned "Modem is locked by another process", and the old code
+-- published zeroes on probe failure, so the dashboards showed "NR
+-- detached" for twenty days while the modem was attached the whole time.
+--
+-- The wait is now deliberately longer than quectel.lock's hold ceiling.
+-- No holder may keep the port beyond that ceiling, so a waiter prepared
+-- to outlast it is guaranteed to get in: at worst it waits for the
+-- ceiling to expire and reclaims. Keep this above
+-- lock_max_hold_seconds or the guarantee is gone.
+local AT_LOCK_MAX_HOLD_SECONDS =
+    quectel_uci.get_number("quectel", "modem", "lock_max_hold_seconds", 15)
+local AT_LOCK_WAIT_MS = (AT_LOCK_MAX_HOLD_SECONDS + 5) * 1000
 
 local STATE_PATH = "/var/run/5g-watchdog.state"
 local RECOVERY_POLL_INTERVAL = 3   -- seconds between mmcli polls while waiting for NR
@@ -263,7 +272,8 @@ local function probe()
     --
     -- The port is opened lazily by the first send() and held until
     -- close(), so both AT calls still share a single open/close.
-    local m = Modem.new(AT_DEVICE, AT_TIMEOUT, AT_LOCK_WAIT_MS, 0)
+    local m = Modem.new(AT_DEVICE, AT_TIMEOUT, AT_LOCK_WAIT_MS, 0,
+                        AT_LOCK_MAX_HOLD_SECONDS)
     local sig, sig_err = m:get_signal_status()
     if not sig then
         m:close()

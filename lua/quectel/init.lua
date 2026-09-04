@@ -24,7 +24,10 @@ function M.load_config()
         device           = uci.get_string("quectel", "modem", "device", "/dev/ttyUSB2"),
         timeout          = uci.get_number("quectel", "modem", "timeout", 2),
         lock_wait_ms     = uci.get_number("quectel", "modem", "lock_wait_ms", 2000),
-        cache_ttl        = uci.get_number("quectel", "modem", "cache_ttl", 5),
+        lock_max_hold_seconds =
+                           uci.get_number("quectel", "modem",
+                                          "lock_max_hold_seconds", 15),
+        cache_ttl        = uci.get_number("quectel", "modem", "cache_ttl", 15),
         beeps_enabled    = uci.get_bool  ("quectel", "modem", "beeps_enabled", true),
         refresh_interval = uci.get_number("quectel", "modem", "refresh_interval", 5),
         lte_bands  = nil,   -- nil = don't change, {} = all bands
@@ -88,7 +91,8 @@ end
 function M.create_modem()
     local config = M.load_config()
     return M.modem.new(config.device, config.timeout,
-                       config.lock_wait_ms, config.cache_ttl)
+                       config.lock_wait_ms, config.cache_ttl,
+                       config.lock_max_hold_seconds)
 end
 
 -- Re-export common utility functions for convenience

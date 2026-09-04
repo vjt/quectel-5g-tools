@@ -4,6 +4,7 @@
 local posix = require("posix")
 local parser = require("quectel.parser")
 local utils = require("quectel.utils")
+local lock = require("quectel.lock")
 
 local M = {}
 M.__index = M
@@ -11,7 +12,6 @@ M.__index = M
 -- Default configuration
 local DEFAULT_DEVICE = "/dev/ttyUSB2"
 local DEFAULT_TIMEOUT = 2  -- seconds
-local LOCK_FILE = "/var/lock/quectel-modem.lock"
 local COMMAND_DELAY = 0.1  -- seconds between commands to reduce USB stress
 -- Max wait when another quectel-5g-tools consumer holds the lock. A
 -- typical AT round-trip (servingcell + qcainfo) takes well under 1 s,
@@ -19,8 +19,11 @@ local COMMAND_DELAY = 0.1  -- seconds between commands to reduce USB stress
 -- the prometheus collector (per-scrape) and ad-hoc 5g-info / 5g-monitor
 -- runs without any of them silently giving up. Tuned via
 -- quectel.modem.lock_wait_ms in /etc/config/quectel if needed.
+--
+-- 5g-watchdog overrides this with a much longer wait: it polls once a
+-- minute and must never be the consumer that loses the race, having
+-- already spent twenty days locked out while publishing zeroes.
 local LOCK_WAIT_MS_DEFAULT = 2000
-local LOCK_POLL_MS = 50
 
 -- ---------------------------------------------------------------------
 -- shared read cache
@@ -109,62 +112,6 @@ local function cache_invalidate()
     end
 end
 
---- Try to atomically create the PID-stamped lockfile, replacing it if
--- the recorded PID no longer exists. Returns the open fd, or nil if
--- the lock is currently held by a live process.
-local function try_create_lock()
-    local fd = posix.open(LOCK_FILE, posix.O_CREAT + posix.O_EXCL + posix.O_WRONLY, 420)
-    if fd then return fd end
-
-    -- Lockfile exists: read its PID and decide whether to clean up.
-    local rf = posix.open(LOCK_FILE, posix.O_RDONLY)
-    if not rf then
-        -- Lockfile vanished between O_EXCL and O_RDONLY (another process
-        -- released it). Try once more.
-        return posix.open(LOCK_FILE, posix.O_CREAT + posix.O_EXCL + posix.O_WRONLY, 420)
-    end
-    local pid_str = posix.read(rf, 32)
-    posix.close(rf)
-    local pid = tonumber(pid_str)
-    if pid and posix.kill(pid, 0) then
-        return nil  -- live owner; caller should wait + retry
-    end
-    -- Stale (dead PID or unparseable contents): remove and retry.
-    os.remove(LOCK_FILE)
-    return posix.open(LOCK_FILE, posix.O_CREAT + posix.O_EXCL + posix.O_WRONLY, 420)
-end
-
---- Acquire exclusive lock on modem using lockfile.
--- Polls until the lock is free or the timeout elapses, so callers
--- racing on the same /dev/ttyUSB2 (5g-led-bars + prometheus collector
--- + ad-hoc CLI) take turns instead of silently failing.
--- @param wait_ms Optional max wait in milliseconds (default 2000)
--- @return true on success, nil + error on failure
-local function acquire_lock(wait_ms)
-    posix.mkdir("/var/lock")  -- ignore error if exists
-
-    wait_ms = wait_ms or LOCK_WAIT_MS_DEFAULT
-    local deadline_attempts = math.max(1, math.floor(wait_ms / LOCK_POLL_MS))
-
-    for _ = 1, deadline_attempts do
-        local fd = try_create_lock()
-        if fd then
-            posix.write(fd, tostring(posix.getpid()))
-            posix.close(fd)
-            return true
-        end
-        utils.sleep(LOCK_POLL_MS / 1000)
-    end
-
-    return nil, string.format(
-        "Modem is locked by another process (waited %d ms)", wait_ms)
-end
-
---- Release lock
-local function release_lock()
-    os.remove(LOCK_FILE)
-end
-
 --- Create a new modem instance
 -- @param device Serial device path (default: /dev/ttyUSB2)
 -- @param timeout Read timeout in seconds (default: 2)
@@ -177,13 +124,16 @@ end
 --   with the other quectel-5g-tools consumers (default 5). Pass 0 to
 --   force every query onto the wire — right for one-shot diagnostics
 --   where a stale-by-seconds answer would mislead.
+-- @param lock_max_hold_seconds Optional ceiling on how long *any* holder
+--   may keep the port before a waiter reclaims it. See quectel.lock.
 -- @return Modem instance
-function M.new(device, timeout, lock_wait_ms, cache_ttl)
+function M.new(device, timeout, lock_wait_ms, cache_ttl, lock_max_hold_seconds)
     local self = setmetatable({}, M)
     self.device = device or DEFAULT_DEVICE
     self.timeout = timeout or DEFAULT_TIMEOUT
-    self.lock_wait_ms = lock_wait_ms
+    self.lock_wait_ms = lock_wait_ms or LOCK_WAIT_MS_DEFAULT
     self.cache_ttl = cache_ttl or CACHE_TTL_DEFAULT
+    self.lock_max_hold_seconds = lock_max_hold_seconds
     self.fd = nil
     self.has_lock = false
     return self
@@ -193,7 +143,10 @@ end
 -- @return true on success, nil + error on failure
 function M:open()
     -- Acquire lock first
-    local ok, lock_err = acquire_lock(self.lock_wait_ms)
+    local ok, lock_err = lock.acquire({
+        wait_ms = self.lock_wait_ms,
+        max_hold_seconds = self.lock_max_hold_seconds,
+    })
     if not ok then
         return nil, lock_err
     end
@@ -201,7 +154,7 @@ function M:open()
 
     local fd, err = posix.open(self.device, posix.O_RDWR + posix.O_NOCTTY + posix.O_NONBLOCK)
     if not fd then
-        release_lock()
+        lock.release()
         self.has_lock = false
         return nil, "Failed to open " .. self.device .. ": " .. (err or "unknown error")
     end
@@ -230,7 +183,7 @@ function M:close()
         self.fd = nil
     end
     if self.has_lock then
-        release_lock()
+        lock.release()
         self.has_lock = false
     end
 end
