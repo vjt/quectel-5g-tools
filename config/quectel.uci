@@ -25,6 +25,19 @@ config modem 'modem'
 	# poll interval. 5g-watchdog deliberately waits longer than this
 	# ceiling, so it can never be starved.
 	option lock_max_hold_seconds '15'
+	# Re-apply the cell lock after boot. Cell locks are volatile — unlike
+	# band locks they do not survive a reboot — so without this a
+	# configured lock quietly stops being in force at every restart.
+	option lock_at_boot '1'
+	# How long to wait after boot before applying. The modem's AT port
+	# does not answer for the first couple of minutes.
+	option lock_boot_wait '150'
+	# After applying, wait this long for service on the bearer; if none
+	# appears, clear the cell lock so the modem can reselect freely.
+	# A lock re-applied at every boot is one a reboot cannot clear, so it
+	# has to be able to clear itself — on 2026-09-04 a lock whose only
+	# cell went away took the WAN down for ~14 minutes. 0 disables.
+	option lock_verify_seconds '120'
 	option beep_interval '0.6'
 	option beeps_enabled '1'
 	list lte_bands '1'

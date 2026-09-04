@@ -5,6 +5,73 @@ package.path = "/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
 
 local quectel = require("quectel")
 local utils = quectel.utils
+local guard = require("quectel.lock_guard")
+local quectel_uci = require("quectel.uci")
+
+--- Log to syslog. A rollback happens unattended, often at boot, and has
+--- to leave a trace someone can find afterwards.
+local function log(fmt, ...)
+    local msg = string.format(fmt, ...)
+    local p = io.popen("logger -t 5g-lock", "w")
+    if p then p:write(msg); p:close() end
+    print(msg)
+end
+
+--- Decoded `ifstatus <iface>`, or nil when it cannot be read.
+local function ifstatus(iface)
+    local jsonc_ok, jsonc = pcall(require, "luci.jsonc")
+    if not jsonc_ok then return nil end
+    local h = io.popen(string.format("ifstatus %s 2>/dev/null", iface), "r")
+    if not h then return nil end
+    local out = h:read("*a") or ""
+    h:close()
+    if out == "" then return nil end
+    return jsonc.parse(out)
+end
+
+--- Watch for service after a lock has been applied, and clear the lock
+--- if it never arrives.
+---
+--- A cell lock pins the modem to a whitelist. If every cell on it goes
+--- unreachable the modem has nowhere to reselect to and there is no
+--- service at all — which is exactly what happened on 2026-09-04, for
+--- ~14 minutes. What rescued it then was that cell locks do not survive
+--- a reboot; now that we re-apply them at boot, that is gone, so the
+--- lock has to be able to undo itself.
+local function verify_or_rollback(modem, verify_seconds, iface)
+    if verify_seconds <= 0 then
+        log("verification disabled (lock_verify_seconds=0) — keeping the lock unconditionally")
+        return
+    end
+
+    log("verifying: waiting up to %ds for service on %s", verify_seconds, iface)
+    local t0 = utils.now()
+    local service_seen = false
+
+    while true do
+        service_seen = guard.service_ok(ifstatus(iface))
+        local elapsed = math.floor(utils.now() - t0)
+        if service_seen then
+            log("service up after %ds — lock verified, keeping it", elapsed)
+            return
+        end
+        if guard.should_rollback({
+                elapsed = elapsed,
+                verify_seconds = verify_seconds,
+                service_seen = service_seen }) then
+            log("NO service %ds after applying the cell lock — clearing it "
+                .. "so the modem can reselect freely", elapsed)
+            if modem:clear_cell_lock("common/4g") then
+                log("cell lock cleared; the configured lte_cells are left in "
+                    .. "UCI, so fix the list or the RF before re-applying")
+            else
+                io.stderr:write("Failed to clear the cell lock — reboot to drop it\n")
+            end
+            return
+        end
+        utils.sleep(5)
+    end
+end
 
 local function print_usage()
     print("Usage: 5g-lock [OPTION]")
@@ -15,6 +82,9 @@ local function print_usage()
     print("  --apply       Apply band and cell lock configuration from UCI")
     print("  --reset       Clear all band and cell locks")
     print("  --wait=SECS   Wait SECS seconds before applying (use with --apply)")
+    print("  --verify      After applying, wait for service and clear the")
+    print("                cell lock if none appears (use with --apply).")
+    print("                Window: quectel.modem.lock_verify_seconds.")
     print("  --help        Show this help")
     print("")
     print("With no options, shows current lock status.")
@@ -85,6 +155,7 @@ end
 -- Parse arguments
 local action = "status"
 local wait_seconds = 0
+local verify = false
 
 for i = 1, #arg do
     local a = arg[i]
@@ -94,6 +165,8 @@ for i = 1, #arg do
         action = "reset"
     elseif a:match("^--wait=") then
         wait_seconds = tonumber(a:match("^--wait=(%d+)")) or 0
+    elseif a == "--verify" then
+        verify = true
     elseif a == "--help" or a == "-h" then
         print_usage()
         os.exit(0)
@@ -281,6 +354,18 @@ if action == "apply" then
 
     print("")
     print_status(modem)
+
+    -- A lock re-applied at every boot is a lock a reboot cannot clear,
+    -- so it has to be able to clear itself.
+    if verify then
+        local verify_seconds = quectel_uci.get_number(
+            "quectel", "modem", "lock_verify_seconds", 120)
+        local iface = quectel_uci.get_string(
+            "quectel", "watchdog", "bearer_iface", "wwan")
+        print("")
+        verify_or_rollback(modem, verify_seconds, iface)
+    end
+
     modem:close()
     os.exit(0)
 end

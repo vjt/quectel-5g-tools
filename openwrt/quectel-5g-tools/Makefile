@@ -14,7 +14,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-5g-tools
-PKG_VERSION:=1.9.1
+PKG_VERSION:=1.10.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=MIT
@@ -92,6 +92,7 @@ define Package/quectel-5g-tools/install
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/init.d/5g-led-bars $(1)/etc/init.d/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/init.d/5g-watchdog $(1)/etc/init.d/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/etc/init.d/5g-cell-lock $(1)/etc/init.d/
 
 	# Tell ModemManager to skip the Quectel USB AT/DIAG/NMEA/AT2 ports
 	# (/dev/ttyUSB0..3). The patched /etc/hotplug.d/tty/25-modemmanager-tty

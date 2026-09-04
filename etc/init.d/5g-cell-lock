@@ -1,0 +1,52 @@
+#!/bin/sh /etc/rc.common
+#
+# Re-apply the configured LTE cell lock after boot.
+#
+# Cell locks live in the modem's volatile state: unlike band locks they
+# do NOT survive a reboot, and nothing used to re-apply them. So a lock
+# configured in UCI silently stopped being in force after every restart,
+# and the modem went back to free reselection — which on this device
+# means drifting onto whichever cell is strongest rather than whichever
+# one actually carries 5G.
+#
+# Applying it again at boot removes the property that made cell locks
+# survivable: "if the lock strands you, reboot and it is gone". So this
+# always runs with --verify, which watches for service after applying
+# and clears the lock if none appears. See quectel.lock_guard.
+#
+# Runs late and waits: the modem's AT port does not answer for the first
+# couple of minutes after boot, and applying before then just fails.
+
+START=97
+STOP=10
+USE_PROCD=1
+
+start_service() {
+    local enabled cells boot_wait
+
+    config_load quectel
+
+    # Only meaningful when a lock is actually configured.
+    cells=$(uci -q get quectel.modem.lte_cells)
+    [ -n "$cells" ] || return 0
+
+    config_get_bool enabled modem lock_at_boot 1
+    [ "$enabled" = "1" ] || return 0
+
+    config_get boot_wait modem lock_boot_wait 150
+
+    procd_open_instance
+    # --wait lets the modem finish coming up before we touch AT; --verify
+    # makes the lock self-clearing if it turns out to strand us.
+    procd_set_param command /usr/bin/5g-lock --apply --verify "--wait=$boot_wait"
+    # One shot per boot: a lock that failed to apply should not be
+    # retried in a loop against a modem that is clearly unhappy.
+    procd_set_param respawn 0 0 0
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+
+service_triggers() {
+    procd_add_reload_trigger "quectel"
+}

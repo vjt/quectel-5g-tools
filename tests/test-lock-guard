@@ -1,0 +1,114 @@
+#!/usr/bin/env lua
+-- Test script for quectel.lock_guard
+--
+-- Cell locks do not survive a reboot, and nothing re-applied them, so a
+-- configured lock silently stopped being in force after every restart.
+-- Re-applying at boot fixes that but removes the escape hatch that made
+-- locks tolerable: "if the lock strands you, reboot and it is gone".
+--
+-- 2026-09-04 is why that hatch matters. A lock onto a single cell held
+-- for 21 minutes, then that cell went away, the modem had nowhere to
+-- reselect to, and the WAN was down for ~14 minutes — with the AT port
+-- mute, so the lock could not even be cleared by hand.
+--
+-- The guard replaces the hatch with something better: after applying a
+-- lock, watch for service, and if it does not appear within the window,
+-- drop the lock automatically. Unattended recovery instead of a reboot
+-- someone has to be present to perform.
+
+package.path = "lua/?.lua;lua/?/init.lua;/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;" .. package.path
+
+local guard = require("quectel.lock_guard")
+
+local passed = 0
+local failed = 0
+
+local function test(name, condition)
+    if condition then
+        print(string.format("  [OK] %s", name))
+        passed = passed + 1
+    else
+        print(string.format("  [FAIL] %s", name))
+        failed = failed + 1
+    end
+end
+
+print("=== Testing lock guard ===")
+print("")
+
+-- -------------------------------------------------------------------
+print("Test 1: service is judged from the bearer interface")
+test("up=true is service",      guard.service_ok({ up = true }) == true)
+test("up=false is not",         guard.service_ok({ up = false }) == false)
+test("missing field is not",    guard.service_ok({}) == false)
+-- ifstatus unreadable: we cannot prove the lock broke anything, and
+-- rolling back on a failed shell-out would drop good locks for no
+-- reason. Absence of evidence is not evidence of breakage.
+test("nil (cannot tell) is not service", guard.service_ok(nil) == false)
+print("")
+
+-- -------------------------------------------------------------------
+print("Test 2: no rollback before the window has elapsed")
+-- A bearer legitimately takes tens of seconds to come up after boot.
+-- Rolling back early would fight the normal startup path.
+test("early, no service yet", guard.should_rollback({
+    elapsed = 10, verify_seconds = 120, service_seen = false }) == false)
+test("at the boundary", guard.should_rollback({
+    elapsed = 119, verify_seconds = 120, service_seen = false }) == false)
+print("")
+
+print("Test 3: rollback once the window passes with no service")
+test("window elapsed", guard.should_rollback({
+    elapsed = 120, verify_seconds = 120, service_seen = false }) == true)
+test("well past", guard.should_rollback({
+    elapsed = 300, verify_seconds = 120, service_seen = false }) == true)
+print("")
+
+print("Test 4: service seen at any point cancels the rollback")
+-- The lock did its job. A later drop is the watchdog's problem, not the
+-- guard's — the guard only answers "did this lock strand us".
+test("seen, window elapsed", guard.should_rollback({
+    elapsed = 300, verify_seconds = 120, service_seen = true }) == false)
+test("seen, early", guard.should_rollback({
+    elapsed = 5, verify_seconds = 120, service_seen = true }) == false)
+print("")
+
+print("Test 5: verification can be switched off")
+-- verify_seconds = 0 means "apply and trust it", for anyone who would
+-- rather keep the lock than keep the link.
+test("disabled never rolls back", guard.should_rollback({
+    elapsed = 99999, verify_seconds = 0, service_seen = false }) == false)
+print("")
+
+-- -------------------------------------------------------------------
+print("Test 6: replaying 2026-09-04 — the lock strands us, guard drops it")
+local seen = false
+local rolled_at = nil
+for elapsed = 0, 300, 10 do
+    -- the single-cell lock never yields service
+    if guard.service_ok({ up = false }) then seen = true end
+    if not rolled_at and guard.should_rollback({
+        elapsed = elapsed, verify_seconds = 120, service_seen = seen }) then
+        rolled_at = elapsed
+    end
+end
+test("rolled back", rolled_at ~= nil)
+test("at the window, not before", rolled_at == 120)
+print("")
+
+print("Test 7: the good case — lock works, guard stays out of the way")
+seen = false
+rolled_at = nil
+for elapsed = 0, 300, 10 do
+    -- service appears at 80s, as the five-cell lock actually did
+    if guard.service_ok({ up = (elapsed >= 80) }) then seen = true end
+    if not rolled_at and guard.should_rollback({
+        elapsed = elapsed, verify_seconds = 120, service_seen = seen }) then
+        rolled_at = elapsed
+    end
+end
+test("never rolled back", rolled_at == nil)
+print("")
+
+print(string.format("Results: %d passed, %d failed", passed, failed))
+if failed > 0 then os.exit(1) end
