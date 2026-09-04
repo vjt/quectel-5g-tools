@@ -772,10 +772,18 @@ local function take_action(p)
             log("NR is down but this is a cell-side condition a bearer "
                 .. "rebuild cannot fix; holding until the anchor changes")
             if tg_enabled() then
+                -- Say only what we know. "This cell has no EN-DC" is a
+                -- claim about the cell we cannot make from one failed
+                -- attempt: anchors are not simply good or bad, they
+                -- differ in how reliably they carry NR (on the
+                -- reference device one anchor sits near 100%, another
+                -- around 30%). What we actually established is that a
+                -- recovery on THIS anchor did not work.
                 notify_telegram(string.format(
-                    "🔻 %s 5G NR down on anchor %s — no EN-DC on this cell. "
-                    .. "Bearer reconnect cannot fix it; waiting for the "
-                    .. "network to hand back a different anchor.",
+                    "🔻 %s 5G NR down on anchor %s — recovery already "
+                    .. "tried and failed here. A bearer rebuild cannot "
+                    .. "change which cell we are camped on, so holding "
+                    .. "until the network hands back a different anchor.",
                     HOSTNAME, p.anchor_label or p.anchor or "unknown"))
             end
             alerted_anchor_stuck = true
