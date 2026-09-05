@@ -54,9 +54,13 @@ start_service() {
     # --wait lets the modem finish coming up before we touch AT; --verify
     # makes the lock self-clearing if it turns out to strand us.
     procd_set_param command /usr/bin/5g-lock --apply --verify "--wait=$boot_wait"
-    # One shot per boot: a lock that failed to apply should not be
-    # retried in a loop against a modem that is clearly unhappy.
-    procd_set_param respawn 0 0 0
+    # Deliberately no respawn. This runs once per boot and exits, and
+    # procd leaves a non-respawning instance stopped once it does.
+    #
+    # Do not "disable" respawn by setting `respawn 0 0 0`: the third
+    # field is the retry count and 0 means retry forever, so that spec
+    # restarts the one-shot every time it finishes — observed on the
+    # first r8 boot, re-applying the lock every 150s in a slow loop.
     procd_set_param stdout 1
     procd_set_param stderr 1
     procd_close_instance
