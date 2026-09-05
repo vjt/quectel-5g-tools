@@ -17,6 +17,29 @@ local function log(fmt, ...)
     print(msg)
 end
 
+-- Records a cell list that stranded the radio. Lives in /etc because it
+-- has to outlive the reboot that clears the lock — /var/run is tmpfs,
+-- and the whole point is to stop the next boot re-applying the same
+-- list. See quectel.lock_guard.should_skip_boot_apply.
+local FAIL_MARKER = "/etc/5g-cell-lock.failed"
+
+local function cells_signature(cells)
+    local parts = {}
+    for _, c in ipairs(cells or {}) do
+        table.insert(parts, string.format("%d,%d", c.earfcn, c.pci))
+    end
+    return table.concat(parts, " ")
+end
+
+local function write_fail_marker(sig)
+    local f = io.open(FAIL_MARKER, "w")
+    if f then f:write(sig, "\n"); f:close() end
+end
+
+local function clear_fail_marker()
+    os.remove(FAIL_MARKER)
+end
+
 --- Decoded `ifstatus <iface>`, or nil when it cannot be read.
 local function ifstatus(iface)
     local jsonc_ok, jsonc = pcall(require, "luci.jsonc")
@@ -38,7 +61,7 @@ end
 --- ~14 minutes. What rescued it then was that cell locks do not survive
 --- a reboot; now that we re-apply them at boot, that is gone, so the
 --- lock has to be able to undo itself.
-local function verify_or_rollback(modem, verify_seconds, iface)
+local function verify_or_rollback(modem, verify_seconds, iface, sig)
     if verify_seconds <= 0 then
         log("verification disabled (lock_verify_seconds=0) — keeping the lock unconditionally")
         return
@@ -53,6 +76,7 @@ local function verify_or_rollback(modem, verify_seconds, iface)
         local elapsed = math.floor(utils.now() - t0)
         if service_seen then
             log("service up after %ds — lock verified, keeping it", elapsed)
+            clear_fail_marker()
             return
         end
         if guard.should_rollback({
@@ -61,11 +85,20 @@ local function verify_or_rollback(modem, verify_seconds, iface)
                 service_seen = service_seen }) then
             log("NO service %ds after applying the cell lock — clearing it "
                 .. "so the modem can reselect freely", elapsed)
+            -- Record the list that stranded us BEFORE trying to clear.
+            -- Clearing can fail outright (+CME ERROR 904 was observed on
+            -- a radio too far gone to take the command), and it is
+            -- exactly that case where the next boot must not re-apply.
+            write_fail_marker(sig)
             if modem:clear_cell_lock("common/4g") then
-                log("cell lock cleared; the configured lte_cells are left in "
-                    .. "UCI, so fix the list or the RF before re-applying")
+                log("cell lock cleared; lte_cells left in UCI, and this list "
+                    .. "is recorded in %s so the next boot will not re-apply "
+                    .. "it — edit the list to try again", FAIL_MARKER)
             else
-                io.stderr:write("Failed to clear the cell lock — reboot to drop it\n")
+                log("could NOT clear the cell lock (the radio refused the "
+                    .. "command); reboot to drop it. This list is recorded "
+                    .. "in %s so the next boot will not re-apply it",
+                    FAIL_MARKER)
             end
             return
         end
@@ -177,8 +210,21 @@ for i = 1, #arg do
     end
 end
 
--- Connect to modem
-local modem = quectel.create_modem()
+-- Connect to modem.
+--
+-- Deliberately patient, unlike the pollers: this is a one-shot action a
+-- person (or the boot-time init script) asked for, and failing it
+-- because 5g-led-bars happened to be mid-poll is useless behaviour. The
+-- wait is longer than quectel.lock's hold ceiling, so no holder can
+-- keep us out — at worst we wait for the ceiling to expire and reclaim.
+-- Contention is heaviest precisely when the init script runs, with
+-- every daemon starting at once.
+local lock_ceiling = quectel_uci.get_number(
+    "quectel", "modem", "lock_max_hold_seconds", 15)
+local config = quectel.load_config()
+local modem = quectel.modem.new(config.device, config.timeout,
+                                (lock_ceiling + 5) * 1000,
+                                config.cache_ttl, lock_ceiling)
 local ok, err = modem:open()
 if not ok then
     io.stderr:write("Error: " .. tostring(err) .. "\n")
@@ -311,6 +357,18 @@ if action == "apply" then
         end
         print(string.format("  LTE cell lock: %s", table.concat(parts, ", ")))
 
+        local cells_ok, offender = guard.validate_cells(config.lte_cells)
+        if not cells_ok then
+            io.stderr:write(string.format(
+                "Refusing to apply: %s,%s is not a valid LTE cell "
+                .. "(EARFCN 0-262143, PCI 0-503). Locking to an out-of-range "
+                .. "cell does not fail cleanly — the modem stores a corrupt "
+                .. "entry, strands the radio and then refuses to clear it.\n",
+                tostring(offender and offender.earfcn),
+                tostring(offender and offender.pci)))
+            modem:close()
+            os.exit(1)
+        end
         if modem:set_cell_lock_4g(config.lte_cells) then
             print("    OK")
         else
@@ -363,7 +421,8 @@ if action == "apply" then
         local iface = quectel_uci.get_string(
             "quectel", "watchdog", "bearer_iface", "wwan")
         print("")
-        verify_or_rollback(modem, verify_seconds, iface)
+        verify_or_rollback(modem, verify_seconds, iface,
+                           cells_signature(config.lte_cells))
     end
 
     modem:close()

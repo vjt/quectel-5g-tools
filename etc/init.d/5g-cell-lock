@@ -35,6 +35,21 @@ start_service() {
 
     config_get boot_wait modem lock_boot_wait 150
 
+    # A lock that stranded the radio records itself here. The rollback
+    # cannot always undo such a lock — a radio far enough gone refuses
+    # the clear command outright, and only a reboot drops it — so
+    # re-applying the same list every boot would be a loop: apply,
+    # strand, reboot, apply. Editing lte_cells counts as new intent and
+    # clears the block.
+    if [ -f /etc/5g-cell-lock.failed ]; then
+        failed=$(cat /etc/5g-cell-lock.failed 2>/dev/null | tr -s " \n" " " | sed -e "s/^ //" -e "s/ $//")
+        current=$(echo "$cells" | tr -s " \n" " " | sed -e "s/^ //" -e "s/ $//")
+        if [ "$failed" = "$current" ]; then
+            logger -t 5g-cell-lock "NOT applying cell lock: this exact list previously left the modem with no service (see /etc/5g-cell-lock.failed). Edit quectel.modem.lte_cells to try again."
+            return 0
+        fi
+    fi
+
     procd_open_instance
     # --wait lets the modem finish coming up before we touch AT; --verify
     # makes the lock self-clearing if it turns out to strand us.

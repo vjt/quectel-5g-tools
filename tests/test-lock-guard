@@ -110,5 +110,51 @@ end
 test("never rolled back", rolled_at == nil)
 print("")
 
+-- -------------------------------------------------------------------
+-- Both of the following were found by actually running the rollback on
+-- hardware on 2026-09-04, and neither was caught by the logic tests
+-- above.
+
+print("Test 8: cell entries are validated before they reach the modem")
+-- Locking to PCI 999 (LTE PCI only goes to 503) did not fail loudly —
+-- the modem stored a corrupt entry that read back as "EARFCN 0 PCI 0",
+-- stranded the radio, and then refused to be cleared.
+test("valid cell", guard.valid_cell({ earfcn = 1350, pci = 47 }) == true)
+test("PCI above 503 rejected", guard.valid_cell({ earfcn = 1350, pci = 999 }) == false)
+test("PCI 503 is the boundary", guard.valid_cell({ earfcn = 1350, pci = 503 }) == true)
+test("negative PCI rejected", guard.valid_cell({ earfcn = 1350, pci = -1 }) == false)
+test("EARFCN out of range rejected", guard.valid_cell({ earfcn = 999999, pci = 47 }) == false)
+test("missing pci rejected", guard.valid_cell({ earfcn = 1350 }) == false)
+test("missing earfcn rejected", guard.valid_cell({ pci = 47 }) == false)
+test("nil rejected", guard.valid_cell(nil) == false)
+
+local ok_all, bad = guard.validate_cells({
+    { earfcn = 275, pci = 34 }, { earfcn = 1350, pci = 47 } })
+test("all-valid list passes", ok_all == true)
+ok_all, bad = guard.validate_cells({
+    { earfcn = 275, pci = 34 }, { earfcn = 1350, pci = 999 } })
+test("list with a bad entry fails", ok_all == false)
+test("the offender is identified", bad ~= nil and bad.pci == 999)
+print("")
+
+print("Test 9: a lock that stranded us is not re-applied at the next boot")
+-- The rollback could not clear the lock over AT (+CME ERROR 904) — the
+-- radio was too far gone to take the command. Only a reboot dropped it.
+-- With the lock re-applied at every boot that is a loop: apply, strand,
+-- reboot, apply again. The marker breaks it.
+local FAILED = "275,34 1350,999"
+test("same list as the failure -> skip",
+     guard.should_skip_boot_apply(FAILED, "275,34 1350,999") == true)
+test("list edited since -> try again",
+     guard.should_skip_boot_apply(FAILED, "275,34 1350,47") == false)
+test("no marker -> apply normally",
+     guard.should_skip_boot_apply(nil, "275,34 1350,47") == false)
+test("empty marker -> apply normally",
+     guard.should_skip_boot_apply("", "275,34 1350,47") == false)
+-- Whitespace differences must not defeat the comparison.
+test("whitespace-insensitive",
+     guard.should_skip_boot_apply("  275,34   1350,999 ", "275,34 1350,999") == true)
+print("")
+
 print(string.format("Results: %d passed, %d failed", passed, failed))
 if failed > 0 then os.exit(1) end

@@ -58,4 +58,58 @@ function M.should_rollback(s)
     return (s.elapsed or 0) >= s.verify_seconds
 end
 
+--- Is this a cell the modem can actually be locked to?
+--
+-- Locking to PCI 999 on 2026-09-04 did not fail loudly: the modem took
+-- the command, stored something that read back as "EARFCN 0 PCI 0",
+-- stranded the radio with nothing to camp on, and then refused
+-- `AT+QNWLOCK="common/4g",0` with +CME ERROR 904 — so the rollback
+-- could not undo it either and only a reboot cleared it. Range-check
+-- before the value reaches the modem; an obviously wrong entry should
+-- be a config error, not an outage.
+--
+-- LTE PCI is 0..503 (168 groups x 3). EARFCN is 0..262143, though real
+-- deployments sit far below that.
+-- @return true when the cell is usable, false otherwise
+function M.valid_cell(c)
+    if type(c) ~= "table" then return false end
+    local e, p = c.earfcn, c.pci
+    if type(e) ~= "number" or type(p) ~= "number" then return false end
+    if e < 0 or e > 262143 then return false end
+    if p < 0 or p > 503 then return false end
+    return true
+end
+
+--- Validate a whole cell list.
+-- @return true, or false plus the first offending entry
+function M.validate_cells(cells)
+    for _, c in ipairs(cells or {}) do
+        if not M.valid_cell(c) then return false, c end
+    end
+    return true
+end
+
+--- Should the boot-time apply be skipped?
+--
+-- The rollback cannot always undo a bad lock: if the radio is far
+-- enough gone the clear command is rejected outright, and only a reboot
+-- drops the lock. Re-applying the same list on the next boot would then
+-- be a loop — apply, strand, reboot, apply. So a failed lock records
+-- the list that failed, and that exact list is not tried again.
+--
+-- Editing the list counts as new intent and clears the block, which
+-- also gives the operator an obvious way out: change the config.
+-- @param marker contents of the failure marker, or nil when absent
+-- @param current the currently configured cell list, same format
+-- @return true when the apply should be skipped
+function M.should_skip_boot_apply(marker, current)
+    if type(marker) ~= "string" then return false end
+    local function norm(x)
+        return (tostring(x or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", ""))
+    end
+    local m = norm(marker)
+    if m == "" then return false end
+    return m == norm(current)
+end
+
 return M
